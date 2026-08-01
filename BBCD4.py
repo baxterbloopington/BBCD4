@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,6 +35,8 @@ DEFAULT_DOWNLOAD_DIR = os.path.expanduser("~/Downloads")
 MAX_WORKERS = 20
 DEFAULT_DOWNLOAD_ATTEMPTS = 4
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36"
+APP_VERSION = "1.1"
+RELEASE_API_URL = "https://api.github.com/repos/baxterbloopington/BBCD4/releases/latest"
 
 DEFAULT_STREAMS = {'ww 051 (1080p)': 'https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_051/hevc_iptv_hd_abr_v1.mpd',
  'ww 051 (720p)': 'https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_051/t=3840/v=pv14/b=5070016/main.m3u8',
@@ -1384,24 +1387,127 @@ def show_settings():
     dialog.grab_set()
 
 
+def version_key(version):
+    """Convert a GitHub tag such as v1.2.0 into comparable numbers."""
+    numbers = re.findall(r"\d+", str(version).lstrip("vV"))
+    return tuple(int(number) for number in numbers) or (0,)
+
+
+def latest_release():
+    """Return the public latest GitHub release and its DMG download link."""
+    request = urllib.request.Request(
+        RELEASE_API_URL,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "BBCD4 update checker",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        release = json.load(response)
+
+    tag = str(release.get("tag_name", "")).strip()
+    if not tag:
+        raise RuntimeError("The latest release does not have a version tag.")
+    dmg_url = next(
+        (
+            asset.get("browser_download_url")
+            for asset in release.get("assets", [])
+            if asset.get("name", "").lower().endswith(".dmg")
+        ),
+        None,
+    )
+    return {
+        "version": tag.lstrip("vV"),
+        "notes": str(release.get("body") or "No release notes were provided."),
+        "download_url": dmg_url,
+        "release_url": release.get("html_url"),
+    }
+
+
+update_info = None
+update_banner = None
+
+
+def apply_update_check(result, show_up_to_date=False):
+    """Update the window after the background GitHub request finishes."""
+    global update_info
+    if isinstance(result, Exception):
+        if show_up_to_date:
+            messagebox.showwarning(
+                "Could not check for updates",
+                "BBCD4 could not reach GitHub right now. Please try again later.",
+            )
+        return
+
+    update_info = result
+    available = version_key(result["version"]) > version_key(APP_VERSION)
+    if available:
+        if update_banner is not None:
+            update_banner.grid(row=0, column=6, sticky="e", padx=(0, 24), pady=(10, 3))
+        if show_up_to_date:
+            show_update_popover()
+    else:
+        if update_banner is not None:
+            update_banner.grid_remove()
+        if show_up_to_date:
+            messagebox.showinfo("BBCD4 is up to date", f"You are using BBCD4 {APP_VERSION}.")
+
+
+def check_for_updates(show_up_to_date=False):
+    """Check GitHub without freezing the interface."""
+    def check():
+        try:
+            result = latest_release()
+        except (OSError, ValueError, urllib.error.URLError) as error:
+            result = error
+        root.after(0, lambda: apply_update_check(result, show_up_to_date))
+
+    ThreadPoolExecutor(max_workers=1).submit(check)
+
+
+def open_update_download():
+    if not update_info:
+        return
+    url = update_info.get("download_url") or update_info.get("release_url")
+    if not url:
+        messagebox.showwarning(
+            "Download unavailable",
+            "This release does not include a DMG download yet.",
+        )
+        return
+    try:
+        subprocess.Popen(["open", url])
+    except OSError as error:
+        messagebox.showerror("Could not open download", str(error))
+
+
 def show_update_popover():
+    if not update_info or version_key(update_info["version"]) <= version_key(APP_VERSION):
+        check_for_updates(show_up_to_date=True)
+        return
+
     dialog = tk.Toplevel(root)
     dialog.withdraw()
-    dialog.title("Updates")
+    dialog.title("Update available")
     dialog.resizable(False, False)
     dialog.transient(root)
     frame = ttk.Frame(dialog, padding=14)
     frame.grid()
-    ttk.Label(frame, text="Updates", font=SECTION_TITLE_FONT).grid(
-        row=0, column=0, sticky="w", pady=(0, 8)
+    ttk.Label(
+        frame, text=f"BBCD4 {update_info['version']} is available", font=SECTION_TITLE_FONT
+    ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+    ttk.Label(frame, text="What's new", font=FORM_LABEL_FONT).grid(
+        row=1, column=0, sticky="w", pady=(0, 2)
     )
     ttk.Label(
-        frame,
-        text=("Automatic update checks will appear here once the release link is connected.\n"
-              "When an update is available, its release notes will be shown before download."),
-        justify="left", wraplength=420,
-    ).grid(row=1, column=0, sticky="w", pady=(0, 12))
-    make_neutral_button(frame, "OK", dialog.destroy, width=10).grid(row=2, column=0, sticky="e")
+        frame, text=update_info["notes"], justify="left", wraplength=430,
+    ).grid(row=2, column=0, sticky="w", pady=(0, 12))
+    buttons = ttk.Frame(frame)
+    buttons.grid(row=3, column=0, sticky="e")
+    make_neutral_button(buttons, "Later", dialog.destroy, width=10).pack(side="left", padx=(0, 8))
+    make_blue_button(
+        buttons, f"Download {update_info['version']}", open_update_download, width=16
+    ).pack(side="left")
     place_on_screen(
         dialog,
         root.winfo_rootx() + (root.winfo_width() // 2),
@@ -1851,6 +1957,7 @@ root.resizable(False, False)
 menu_bar = tk.Menu(root)
 file_menu = tk.Menu(menu_bar, tearoff=False)
 file_menu.add_command(label="Settings…", command=show_settings)
+file_menu.add_command(label="Check for updates…", command=lambda: check_for_updates(show_up_to_date=True))
 file_menu.add_separator()
 file_menu.add_command(label="Quit BBCD4", command=root.destroy)
 menu_bar.add_cascade(label="File", menu=file_menu)
@@ -1890,6 +1997,9 @@ logo_placeholder = tk.Label(
 )
 logo_placeholder.image = logo_image
 logo_placeholder.grid(row=1, column=6, rowspan=6, sticky="e", padx=(0, 24), pady=0)
+
+# Kept hidden until GitHub reports a release newer than this installed version.
+update_banner = make_red_button(root, "Update!", show_update_popover, width=16)
 
 schedule_controls = ttk.Frame(root)
 schedule_controls.grid(row=3, column=0, columnspan=4, sticky="w", padx=8)
@@ -1987,5 +2097,8 @@ discord_button.bind("<Leave>", lambda event: discord_button.configure(bg=root.cg
 
 progress = ttk.Progressbar(root, mode="determinate", length=430)
 progress.grid(row=8, column=0, columnspan=7, sticky="ew", padx=8, pady=(0, 10))
+
+if settings.get("check_updates_on_launch", True):
+    root.after(500, check_for_updates)
 
 root.mainloop()
