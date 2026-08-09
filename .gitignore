@@ -1,22 +1,13 @@
-# Personal BBCD4 data
-settings.json
-streams.json
-
-# Local builds and installers
-build/
-dist/
-release/
-BBCD4/
-BBCD-4.0-Apple-Silicon*/
-*.app
-*.dmg
-*.zip
-*.spec
-
-# Python and macOS
-__pycache__/
-*.py[cod]
 .DS_Store
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
 
-# Local release helper
-Make BBCD4 DMG.command
+release/
+*.dmg
+*.app
+
+streams.json
+settings.json
