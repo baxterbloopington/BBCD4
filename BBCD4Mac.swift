@@ -33,7 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.maxSize = NSSize(width: 520, height: 520)
         window.delegate = self
         window.center()
+        window.initialFirstResponder = nil
         window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
     }

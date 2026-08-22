@@ -10,12 +10,15 @@ struct ContentView: View {
     @AppStorage("dateFormat") private var dateFormat = "dd/MM/yyyy"
     @AppStorage("downloadFolder") private var downloadFolderPath = ""
     @AppStorage("confirmDownloads") private var confirmDownloads = false
-    @AppStorage("revealFinishedVideo") private var revealFinishedVideo = false
+    @AppStorage("revealFinishedVideo") private var revealFinishedMedia = false
     @AppStorage("checkForUpdates") private var checkForUpdates = true
     @AppStorage("downloadAttempts") private var downloadAttempts = 3
     @AppStorage("retryDelay") private var retryDelay = 2.0
     @AppStorage("sequentialDownloads") private var sequentialDownloads = false
     @AppStorage("segmentDownloadLimit") private var segmentDownloadLimit = 5
+    @AppStorage("streamLaunchFilter") private var launchStreamFilter = "All"
+    @AppStorage("activeStreamCategoryFilter") private var activeStreamCategoryFilter = ""
+    @AppStorage("activeFavouritesOnly") private var activeFavouritesOnly = false
     
     @State private var startDate = Date()
     @State private var hours = 0
@@ -35,6 +38,22 @@ struct ContentView: View {
     
     init(downloadController: DownloadController) {
         _downloadController = ObservedObject(wrappedValue: downloadController)
+    }
+
+    private var activeFilteredStreams: [Stream] {
+        let category = StreamCategory.allCases.first { $0.title == activeStreamCategoryFilter }
+        return streamStore.streams.filter { stream in
+            (!activeFavouritesOnly || stream.isFavourite)
+                && (category == nil || stream.category == category)
+        }
+    }
+
+    private func applyLaunchFilterToActiveFilter() {
+        activeFavouritesOnly = launchStreamFilter == "Favourites"
+        activeStreamCategoryFilter = StreamCategory.allCases
+            .first { $0.title == launchStreamFilter }?
+            .title ?? ""
+        streamStore.selectedStreamID = activeFilteredStreams.first?.id
     }
 
     var body: some View {
@@ -58,7 +77,7 @@ struct ContentView: View {
                     MainFormLabel("Choose stream")
                     HStack(spacing: ControlMetrics.iconButtonGap) {
                         StreamSelector(
-                            streams: streamStore.streams,
+                            streams: activeFilteredStreams,
                             selection: $streamStore.selectedStreamID
                         )
                         .frame(width: ControlMetrics.streamSelectorWidth, height: ControlMetrics.height)
@@ -119,9 +138,11 @@ struct ContentView: View {
                     .buttonStyle(HoverPrimaryButtonStyle())
                     .frame(width: ControlMetrics.durationWidth, height: ControlMetrics.height)
                     .disabled(!downloadController.isDownloading && (streamStore.selectedStream == nil || duration == 0))
-                    Toggle("Encode to H.265", isOn: $encodeH265)
-                        .toggleStyle(.checkbox)
-                        .hoverHint("Improves video compatability with Apple device.\nMay take a while for longer videos.")
+                    if !selectedStreamIsRadio {
+                        Toggle("Encode to H.265", isOn: $encodeH265)
+                            .toggleStyle(.checkbox)
+                            .hoverHint("Improves video compatibility with Apple devices.\nEncoding can be a very slow process.")
+                    }
                     Spacer()
                     HStack(spacing: ControlMetrics.iconButtonGap) {
                         Button(action: openDiscord) {
@@ -188,6 +209,7 @@ struct ContentView: View {
             SettingsView()
         }
         .onAppear {
+            applyLaunchFilterToActiveFilter()
             applyDefaultDuration()
             syncDateInputs()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -200,7 +222,7 @@ struct ContentView: View {
         .onChange(of: defaultMinutes) { _, _ in applyDefaultDuration() }
         .onChange(of: defaultSeconds) { _, _ in applyDefaultDuration() }
         .onChange(of: downloadController.completedOutput) { _, output in
-            if revealFinishedVideo, let output {
+            if revealFinishedMedia, let output {
                 NSWorkspace.shared.open(output)
                 downloadController.completedOutput = nil
             }
@@ -353,16 +375,23 @@ struct ContentView: View {
     private func isValidStartDate(_ date: Date) -> Bool {
         let now = Date()
         if date > now {
-            validationMessage = "Choose a date and time that is not in the future."
+            validationMessage = "Date and time cannot be in the future."
             return false
         }
-        let earliestAllowedDay = Calendar.current.date(
-            byAdding: .day,
-            value: -14,
-            to: Calendar.current.startOfDay(for: now)
-        ) ?? now
-        if date < earliestAllowedDay {
-            validationMessage = "You cannot download from more than 14 days in the past."
+        let earliestAllowedDate: Date
+        if selectedStreamIsRadio {
+            earliestAllowedDate = now.addingTimeInterval(-2 * 24 * 60 * 60)
+        } else {
+            earliestAllowedDate = Calendar.current.date(
+                byAdding: .day,
+                value: -14,
+                to: Calendar.current.startOfDay(for: now)
+            ) ?? now
+        }
+        if date <= earliestAllowedDate {
+            validationMessage = selectedStreamIsRadio
+                ? "Radio downloads are available for the last 24 hours only."
+                : "Video downloads are available for the last 14 days only."
             return false
         }
         return true
@@ -370,20 +399,19 @@ struct ContentView: View {
     
     private func isValidEndDate(_ date: Date, duration: Int) -> Bool {
         guard date.addingTimeInterval(TimeInterval(duration)) <= Date() else {
-            validationMessage = "The duration selected means the video would end in the future. Please change the start time or duration."
+            validationMessage = "This download would end in the future. Please change the start time or duration."
             return false
         }
         return true
     }
+
+    private var selectedStreamIsRadio: Bool {
+        streamStore.selectedStream?.category == .radio
+    }
     
     private func loadImage(named name: String) -> NSImage? {
-        for fileExtension in ["svg", "png"] {
-            guard let url = AppResources.url(forResource: name, withExtension: fileExtension) else { continue }
-            if let image = NSImage(contentsOf: url) {
-                return image
-            }
-        }
-        return nil
+        guard let url = AppResources.url(forResource: name, withExtension: "svg") else { return nil }
+        return NSImage(contentsOf: url)
     }
     
     private func openDiscord() {
@@ -469,14 +497,14 @@ private struct BBCD4DialogModifier: ViewModifier {
                 }
             }
             .alert("Download complete!", isPresented: isDownloadCompletePresented) {
-                Button("Show video") {
+                Button("Show media") {
                     if let output = downloadController.completedOutput {
                         NSWorkspace.shared.open(output)
                     }
                 }
                 Button("OK", role: .cancel) {}
             } message: {
-                Text(downloadController.completedOutput?.path ?? "")
+                Text("Saved to \(downloadController.completedOutput?.path ?? "")")
             }
             .alert("Download failed", isPresented: isDownloadErrorPresented) {
                 Button("OK", role: .cancel) {}
@@ -548,10 +576,10 @@ private enum ControlMetrics {
     static let controlBorderOpacity = 0.10
     static let accessoryWidth: CGFloat = 44
     static let dateTimeAccessoryWidth: CGFloat = 44
-    static let timeChevronOffset: CGFloat = 16
-    static let timeChevronHitWidth: CGFloat = 44
+    static let timeChevronOffset: CGFloat = 0
+    static let timeChevronHitWidth: CGFloat = 38
     static let timeChevronHitHeight: CGFloat = 32
-    static let durationAccessoryWidth = accessoryWidth
+    static let durationAccessoryWidth: CGFloat = 28
     static let durationArrowOffset: CGFloat = 10
     static let fieldGap: CGFloat = 16
     static let iconButtonGap: CGFloat = 8
@@ -582,7 +610,7 @@ private struct MainFormLabel: View {
 }
 
 private enum SettingsLayout {
-    static let sheetWidth: CGFloat = 660
+    static let sheetWidth: CGFloat = 560
     static let sheetHeight: CGFloat = 720
     static let horizontalInset: CGFloat = 24
     static let scrollbarReserve: CGFloat = 18
@@ -652,6 +680,7 @@ private struct HoverPrimaryButton: View {
     let configuration: ButtonStyle.Configuration
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
+
     
     var body: some View {
         configuration.label
@@ -784,15 +813,15 @@ private struct IncompleteDownloadDialog: View {
             Text("""
             You can either:
             • Retry download from the failed segment
-            • Abort without saving video
-            • Save video of all successful segments
+            • Abort without saving
+            • Save any successfully downloaded segments
             """)
             .font(.body)
             .foregroundStyle(Color.primary.opacity(0.68))
             .fixedSize(horizontal: false, vertical: true)
             
             VStack(spacing: 9) {
-                DialogActionButton(title: "Try again", style: .primary, action: retry)
+                DialogActionButton(title: "Retry", style: .primary, action: retry)
                 DialogActionButton(title: "Abort", style: .destructive, action: abort)
                 DialogActionButton(title: "Save", style: .secondary, action: save)
             }
@@ -927,9 +956,105 @@ private final class StreamMenuTriggerView: NSView {
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height), in: self)
     }
 
+    override func scrollWheel(with event: NSEvent) {
+        guard !streams.isEmpty, event.scrollingDeltaY != 0 else { return }
+        let currentIndex = streams.firstIndex { $0.id == selectedID } ?? 0
+        let step = event.scrollingDeltaY > 0 ? -1 : 1
+        let nextIndex = min(max(currentIndex + step, 0), streams.count - 1)
+        guard nextIndex != currentIndex else { return }
+        onSelect?(streams[nextIndex].id)
+    }
+
     @objc private func selectStream(_ sender: NSMenuItem) {
         guard let streamID = sender.representedObject as? String else { return }
         onSelect?(streamID)
+    }
+}
+
+private struct TimeMenuTrigger: NSViewRepresentable {
+    let options: [String]
+    @Binding var selection: String
+    let onSelect: () -> Void
+    let onHoverChanged: (Bool) -> Void
+
+    func makeNSView(context: Context) -> TimeMenuTriggerView {
+        let view = TimeMenuTriggerView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.clear.cgColor
+        view.onSelect = { time in
+            selection = time
+            onSelect()
+        }
+        view.onHoverChanged = onHoverChanged
+        return view
+    }
+
+    func updateNSView(_ view: TimeMenuTriggerView, context: Context) {
+        view.options = options
+        view.selectedValue = selection
+        view.onSelect = { time in
+            selection = time
+            onSelect()
+        }
+        view.onHoverChanged = onHoverChanged
+    }
+}
+
+private final class TimeMenuTriggerView: NSView {
+    var options: [String] = []
+    var selectedValue = ""
+    var onSelect: ((String) -> Void)?
+    var onHoverChanged: ((Bool) -> Void)?
+    private var hoverTrackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.activeAlways, .inVisibleRect, .mouseEnteredAndExited],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        hoverTrackingArea = trackingArea
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHoverChanged?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHoverChanged?(false)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let menu = NSMenu()
+        for option in options {
+            let item = NSMenuItem(title: option, action: #selector(selectTime(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = option
+            item.state = option == selectedValue ? .on : .off
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height), in: self)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard !options.isEmpty, event.scrollingDeltaY != 0 else { return }
+        let currentIndex = options.firstIndex(of: selectedValue) ?? 0
+        let step = event.scrollingDeltaY > 0 ? -1 : 1
+        let nextIndex = min(max(currentIndex + step, 0), options.count - 1)
+        guard nextIndex != currentIndex else { return }
+        onSelect?(options[nextIndex])
+    }
+
+    @objc private func selectTime(_ sender: NSMenuItem) {
+        guard let time = sender.representedObject as? String else { return }
+        onSelect?(time)
     }
 }
 
@@ -939,6 +1064,8 @@ private struct DateSelector: View {
     let onCommit: () -> Void
     let showCalendar: () -> Void
     @FocusState private var isFocused: Bool
+    @State private var isHovered = false
+    @State private var isHoveringCalendar = false
     
     var body: some View {
         HStack(spacing: 0) {
@@ -948,33 +1075,45 @@ private struct DateSelector: View {
                 .frame(width: ControlMetrics.dateTimeValueWidth,
                        height: ControlMetrics.height)
                 .focused($isFocused)
-                .allowsHitTesting(DateFormats.supportsNumericEntry(for: dateFormat))
                 .onSubmit(onCommit)
                 .onChange(of: value) { _, text in
                     guard DateFormats.supportsNumericEntry(for: dateFormat) else { return }
                     let sanitized = DateFormats.sanitizedNumericInput(text, format: dateFormat)
                     if value != sanitized { value = sanitized }
                 }
+
             Button(action: showCalendar) {
-                ZStack {
-                    Color.clear
-                    Image(systemName: "calendar")
-                        .font(.system(size: 16, weight: .medium))
-                }
-                .frame(width: ControlMetrics.dateTimeAccessoryWidth, height: ControlMetrics.height)
-                .contentShape(Rectangle())
+                Image(systemName: "calendar")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: ControlMetrics.dateTimeAccessoryWidth,
+                           height: ControlMetrics.height)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .background {
+                if isHoveringCalendar {
+                    Rectangle()
+                        .fill(Color.primary.opacity(ControlMetrics.hoverOpacity))
+                }
+            }
+            .onHover { isHoveringCalendar = $0 }
         }
         .frame(width: ControlMetrics.dateWidth, height: ControlMetrics.height)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous))
-        .sharedControlHover()
+        .clipShape(RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous)
+                .fill(isHovered && !isHoveringCalendar ? Color.primary.opacity(ControlMetrics.hoverOpacity) : .clear)
+                .allowsHitTesting(false)
+        }
         .overlay {
             RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous)
                 .stroke(
                     isFocused ? Color.accentColor : Color.primary.opacity(ControlMetrics.controlBorderOpacity),
                     lineWidth: isFocused ? 2 : 1)
+                .allowsHitTesting(false)
         }
+        .onHover { isHovered = $0 }
         .onChange(of: isFocused) { _, focused in
             if !focused { onCommit() }
         }
@@ -985,7 +1124,9 @@ private struct TimeSelector: View {
     @Binding var value: String
     let onCommit: () -> Void
     @State private var isFocused = false
-    
+    @State private var isHovered = false
+    @State private var isHoveringMenu = false
+
     private let timeOptions = (0..<48).map { index in
         String(format: "%02d:%02d:00", index / 2, index.isMultiple(of: 2) ? 0 : 30)
     }
@@ -997,31 +1138,40 @@ private struct TimeSelector: View {
                 isFocused: $isFocused,
                 onCommit: onCommit
             )
-                .frame(width: ControlMetrics.timeValueWidth, height: ControlMetrics.height)
-            Menu {
-                ForEach(timeOptions, id: \.self) { time in
-                    Button(time) {
-                        value = time
-                        onCommit()
-                    }
-                }
-            } label: {
-                ZStack {
-                    Color.clear
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 15, weight: .semibold))
-                        .offset(x: ControlMetrics.timeChevronOffset)
-                }
-                .frame(width: ControlMetrics.timeChevronHitWidth, height: ControlMetrics.timeChevronHitHeight)
+            .frame(width: ControlMetrics.timeValueWidth, height: ControlMetrics.height)
+
+            ZStack {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 15, weight: .semibold))
+                    .offset(x: ControlMetrics.timeChevronOffset)
+
+                TimeMenuTrigger(
+                    options: timeOptions,
+                    selection: $value,
+                    onSelect: onCommit,
+                    onHoverChanged: { isHoveringMenu = $0 }
+                )
+                .frame(width: ControlMetrics.timeChevronHitWidth,
+                       height: ControlMetrics.timeChevronHitHeight)
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: ControlMetrics.timeChevronHitWidth, height: ControlMetrics.timeChevronHitHeight)
+            .frame(width: ControlMetrics.timeChevronHitWidth,
+                   height: ControlMetrics.timeChevronHitHeight)
+            .background {
+                if isHoveringMenu {
+                    Rectangle()
+                        .fill(Color.primary.opacity(ControlMetrics.hoverOpacity))
+                }
+            }
             .contentShape(Rectangle())
         }
         .frame(width: ControlMetrics.timeWidth, height: ControlMetrics.height)
         .background(.quaternary, in: RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous))
-        .sharedControlHover()
+        .clipShape(RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous)
+                .fill(isHovered && !isHoveringMenu ? Color.primary.opacity(ControlMetrics.hoverOpacity) : .clear)
+                .allowsHitTesting(false)
+        }
         .overlay {
             RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous)
                 .stroke(
@@ -1029,7 +1179,9 @@ private struct TimeSelector: View {
                     ? Color.accentColor
                     : Color.primary.opacity(ControlMetrics.controlBorderOpacity),
                     lineWidth: isFocused ? 2 : 1)
+                .allowsHitTesting(false)
         }
+        .onHover { isHovered = $0 }
         .onChange(of: isFocused) { _, focused in
             if !focused { onCommit() }
         }
@@ -1065,7 +1217,7 @@ private struct TimeEntryField: NSViewRepresentable {
         context.coordinator.acceptExternalValue(value)
     }
     
-    final class Coordinator: NSObject, NSTextFieldDelegate {
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
         @Binding private var value: String
         @Binding private var isFocused: Bool
         private let onCommit: () -> Void
@@ -1268,6 +1420,11 @@ private struct TimeEntryField: NSViewRepresentable {
 private final class FocusTrackingTextField: NSTextField {
     var onFocusChange: ((Bool) -> Void)?
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .iBeam)
+    }
+
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
         if accepted {
@@ -1290,43 +1447,83 @@ private struct DurationControl: View {
     @Binding var value: Int
     let range: ClosedRange<Int>
     @State private var isFocused = false
-    
+    @State private var isHovered = false
+    @State private var isHoveringStepper = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 0) {
-                DigitsOnlyNumberField(value: $value, range: range) { isFocused = $0 }
-                    .frame(maxWidth: .infinity)
-                VStack(spacing: 1) {
-                    RepeatButton(image: "chevron.up") {
-                        value = min(value + 1, range.upperBound)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    RepeatButton(image: "chevron.down") {
-                        value = max(value - 1, range.lowerBound)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                DigitsOnlyNumberField(value: $value, range: range) {
+                    isFocused = $0
                 }
-                .frame(width: ControlMetrics.durationAccessoryWidth, height: ControlMetrics.height)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                DurationStepperAccessory(
+                    value: $value,
+                    range: range,
+                    onHoverChanged: { isHoveringStepper = $0 }
+                )
             }
             .frame(width: ControlMetrics.durationWidth, height: ControlMetrics.height)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous))
-            .sharedControlHover()
+            .clipShape(RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous))
             .overlay {
-                RoundedRectangle(
-                    cornerRadius: ControlMetrics.cornerRadius,
-                    style: .continuous
-                )
-                .stroke(
-                    isFocused ? Color.accentColor : Color.primary.opacity(ControlMetrics.controlBorderOpacity),
-                    lineWidth: isFocused ? 2 : 1
-                )
+                RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous)
+                    .fill(isHovered && !isHoveringStepper ? Color.primary.opacity(ControlMetrics.hoverOpacity) : .clear)
+                    .allowsHitTesting(false)
             }
-            if let title, !title.isEmpty {
+            .overlay {
+                RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous)
+                    .stroke(isFocused ? Color.accentColor : Color.primary.opacity(ControlMetrics.controlBorderOpacity), lineWidth: isFocused ? 2 : 1)
+                    .allowsHitTesting(false)
+            }
+            .onHover { isHovered = $0 }
+
+            if let title {
                 Text(title)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .frame(height: ControlMetrics.durationCaptionHeight, alignment: .topLeading)
             }
+        }
+        .frame(width: ControlMetrics.durationWidth, alignment: .leading)
+    }
+}
+
+private struct DurationStepperAccessory: View {
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    var onHoverChanged: ((Bool) -> Void)? = nil
+    @State private var isHovered = false
+
+    private let chevronWidth: CGFloat = 18
+
+    var body: some View {
+        VStack(spacing: 0) {
+            RepeatButton(image: "chevron.up") {
+                value = min(value + 1, range.upperBound)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Rectangle()
+                .fill(Color.primary.opacity(ControlMetrics.controlBorderOpacity * 1.8))
+                .frame(width: chevronWidth, height: 1)
+
+            RepeatButton(image: "chevron.down") {
+                value = max(value - 1, range.lowerBound)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: ControlMetrics.durationAccessoryWidth, height: ControlMetrics.height)
+        .background {
+            if isHovered {
+                Rectangle()
+                    .fill(Color.primary.opacity(ControlMetrics.hoverOpacity))
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovered = hovering
+            onHoverChanged?(hovering)
         }
     }
 }
@@ -1380,9 +1577,8 @@ private struct RepeatButton: View {
     
     var body: some View {
         Image(systemName: image)
-            .font(.caption)
+            .font(.system(size: 16, weight: .medium))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .offset(x: ControlMetrics.durationArrowOffset)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
@@ -1411,80 +1607,303 @@ private struct RepeatButton: View {
     }
 }
 
+private struct PersistentListScroller: NSViewRepresentable {
+    let scrollerStyle: NSScroller.Style
+    let onConfigured: (Bool) -> Void
+
+    init(scrollerStyle: NSScroller.Style = .legacy, onConfigured: @escaping (Bool) -> Void) {
+        self.scrollerStyle = scrollerStyle
+        self.onConfigured = onConfigured
+    }
+
+    func makeNSView(context: Context) -> ScrollViewConfigurationView {
+        let view = ScrollViewConfigurationView()
+        view.configure = { hostView in
+            configureScrollView(containing: hostView)
+        }
+        return view
+    }
+
+    func updateNSView(_ view: ScrollViewConfigurationView, context: Context) {
+        view.configure = { hostView in
+            configureScrollView(containing: hostView)
+        }
+        view.configureNow()
+    }
+
+    private func configureScrollView(containing view: NSView) {
+        var candidate: NSView? = view
+        while let current = candidate {
+            if let scrollView = findScrollView(in: current) {
+                scrollView.scrollerStyle = scrollerStyle
+                let needsVerticalScroller = (scrollView.documentView?.frame.height ?? 0)
+                    > scrollView.contentView.bounds.height
+                scrollView.hasVerticalScroller = needsVerticalScroller
+                scrollView.autohidesScrollers = false
+                scrollView.verticalScroller?.isHidden = !needsVerticalScroller
+                DispatchQueue.main.async {
+                    onConfigured(needsVerticalScroller)
+                }
+                return
+            }
+            candidate = current.superview
+        }
+    }
+
+    private func findScrollView(in view: NSView) -> NSScrollView? {
+        if let scrollView = view as? NSScrollView {
+            return scrollView
+        }
+        for subview in view.subviews {
+            if let scrollView = findScrollView(in: subview) {
+                return scrollView
+            }
+        }
+        return nil
+    }
+}
+
+private final class ScrollViewConfigurationView: NSView {
+    var configure: ((NSView) -> Void)?
+
+    override func viewWillMove(toSuperview newSuperview: NSView?) {
+        if let newSuperview {
+            configure?(newSuperview)
+        }
+        super.viewWillMove(toSuperview: newSuperview)
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        configureNow()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        configureNow()
+    }
+
+    override func layout() {
+        super.layout()
+        configureNow()
+    }
+
+    func configureNow() {
+        configure?(self)
+    }
+}
+
+private struct ManageStreamsSearchField: NSViewRepresentable {
+    @Binding var text: String
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+    
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.placeholderString = "Search"
+        field.controlSize = .large
+        field.delegate = context.coordinator
+        field.sendsSearchStringImmediately = true
+        return field
+    }
+    
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        context.coordinator.parent = self
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+    }
+    
+    @MainActor
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var parent: ManageStreamsSearchField
+        
+        init(parent: ManageStreamsSearchField) {
+            self.parent = parent
+        }
+        
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSSearchField else { return }
+            parent.text = field.stringValue
+        }
+    }
+}
+
+
 struct StreamManagementView: View {
     private enum FocusTarget: Hashable {
         case streamList
         case search
     }
-    
+
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var streamStore: StreamStore
 
     @State private var showingAddStream = false
     @State private var showingEditStream = false
     @State private var showingDeleteConfirmation = false
+    @State private var showingResetConfirmation = false
     @State private var searchText = ""
+    @State private var categoryFilter: StreamCategory?
+    @State private var favouritesOnly = false
+    @State private var isStreamListReady = false
+    @State private var listNeedsScrollbar = true
     @AppStorage("skipDeleteConfirmation") private var skipDeleteConfirmation = false
+    @AppStorage("activeStreamCategoryFilter") private var activeStreamCategoryFilter = ""
+    @AppStorage("activeFavouritesOnly") private var activeFavouritesOnly = false
     @FocusState private var focusedTarget: FocusTarget?
 
     private var filteredStreams: [Stream] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return streamStore.streams }
-        return streamStore.streams.filter {
-            $0.name.localizedCaseInsensitiveContains(query)
+        return streamStore.streams.filter { stream in
+            (categoryFilter == nil || stream.category == categoryFilter)
+                && (!favouritesOnly || stream.isFavourite)
+                && (query.isEmpty || stream.name.localizedCaseInsensitiveContains(query))
         }
+    }
+
+
+    private var allStreamsFilterBinding: Binding<Bool> {
+        Binding(
+            get: { categoryFilter == nil && !favouritesOnly },
+            set: { isAllStreams in
+                guard isAllStreams else { return }
+                categoryFilter = nil
+                favouritesOnly = false
+            }
+        )
+    }
+
+    private func categoryFilterBinding(for category: StreamCategory) -> Binding<Bool> {
+        Binding(
+            get: { categoryFilter == category },
+            set: { isSelected in
+                categoryFilter = isSelected ? category : nil
+            }
+        )
+    }
+
+    private func applyActiveFilter() {
+        favouritesOnly = activeFavouritesOnly
+        categoryFilter = StreamCategory.allCases.first { $0.title == activeStreamCategoryFilter }
+    }
+
+    private func saveActiveFilter() {
+        activeFavouritesOnly = favouritesOnly
+        activeStreamCategoryFilter = categoryFilter?.title ?? ""
+        let matchingStreams = streamStore.streams.filter { stream in
+            (!favouritesOnly || stream.isFavourite)
+                && (categoryFilter == nil || stream.category == categoryFilter)
+        }
+        if !matchingStreams.contains(where: { $0.id == streamStore.selectedStreamID }) {
+            streamStore.selectedStreamID = matchingStreams.first?.id
+        }
+    }
+    private func dismissSearchFocus() {
+        NSApp.keyWindow?.makeFirstResponder(nil)
+    }
+
+    private func handleStreamShortcut(_ keyPress: KeyPress) -> KeyPress.Result {
+        guard focusedTarget == .streamList,
+              let selectedStreamID = streamStore.selectedStreamID else {
+            return .ignored
+        }
+
+        switch keyPress.characters.lowercased() {
+        case "f":
+            streamStore.toggleFavourite(selectedStreamID)
+        case "t":
+            streamStore.setCategory(.television, for: selectedStreamID)
+        case "r":
+            streamStore.setCategory(.radio, for: selectedStreamID)
+        case "l":
+            streamStore.setCategory(.liveStream, for: selectedStreamID)
+        default:
+            return .ignored
+        }
+
+        return .handled
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Text("Manage streams")
-                    .font(.largeTitle.weight(.bold))
-                Spacer()
-                HStack(spacing: 6) {
-                    TextField("Search streams", text: $searchText)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($focusedTarget, equals: .search)
-                    if !searchText.isEmpty {
-                        Button {
-                            searchText = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
+            VStack(spacing: 10) {
+                HStack(alignment: .center) {
+                    Text("Manage streams")
+                        .font(.largeTitle.weight(.bold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Spacer()
+                    ManageStreamsSearchField(text: $searchText)
+                    .frame(width: 210 - SettingsLayout.scrollbarReserve)
+                }
+                .padding(.leading, SettingsLayout.horizontalInset)
+                .padding(.trailing, SettingsLayout.horizontalInset + SettingsLayout.scrollbarReserve)
+                HStack(alignment: .center, spacing: 12) {
+                    Text("Displaying \(filteredStreams.count) of \(streamStore.streams.count) streams")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+
+                    Menu {
+                        Toggle("All", isOn: allStreamsFilterBinding)
+                        Divider()
+                        Toggle("Favourites", isOn: $favouritesOnly)
+                        Divider()
+                        ForEach(StreamCategory.allCases) { category in
+                            Toggle(category.title, isOn: categoryFilterBinding(for: category))
                         }
-                        .buttonStyle(.plain)
+                    } label: {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous)
+                                .fill(Color.primary.opacity(0.001))
+                            Image(systemName: "line.3.horizontal.decrease.circle")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 18, height: 18)
+                        }
+                        .frame(width: 40, height: 40)
+                        .contentShape(Rectangle())
                     }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .help("Filter streams")
+                    .zIndex(1)
                 }
-                .frame(width: 220)
+                .padding(.leading, SettingsLayout.horizontalInset)
+                .padding(.trailing, SettingsLayout.horizontalInset + SettingsLayout.scrollbarReserve - 10)
             }
-            .padding(.horizontal)
-            .padding(.vertical, 10)
+            .padding(.top, SettingsLayout.horizontalInset)
+            .padding(.bottom, 10)
             List(selection: $streamStore.selectedStreamID) {
-                if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    ForEach(streamStore.streams) { stream in
-                        streamRow(stream)
-                    }
-                    .onMove { source, destination in
-                        streamStore.move(fromOffsets: source, toOffset: destination)
-                        focusedTarget = .streamList
-                    }
-                } else {
-                    ForEach(filteredStreams) { stream in
-                        streamRow(stream)
-                    }
-                    .onMove { source, destination in
-                        streamStore.moveFiltered(
-                            fromOffsets: source,
-                            toOffset: destination,
-                            in: filteredStreams
-                        )
-                        focusedTarget = .streamList
-                    }
+                ForEach(filteredStreams) { stream in
+                    streamRow(stream)
+                }
+                .onMove { source, destination in
+                    streamStore.moveFiltered(
+                        fromOffsets: source,
+                        toOffset: destination,
+                        in: filteredStreams
+                    )
+                    focusedTarget = .streamList
                 }
             }
+            .simultaneousGesture(TapGesture().onEnded {
+                dismissSearchFocus()
+            })
+            .background(PersistentListScroller { needsScrollbar in
+                listNeedsScrollbar = needsScrollbar
+                isStreamListReady = true
+            })
+            .padding(.trailing, listNeedsScrollbar ? 0 : SettingsLayout.scrollbarReserve)
+            .opacity(isStreamListReady ? 1 : 0)
             .frame(minWidth: 500, minHeight: 440)
+            .padding(.leading, SettingsLayout.horizontalInset - 16)
             .focusable()
+            .focusEffectDisabled()
             .focused($focusedTarget, equals: .streamList)
+            .onKeyPress(characters: .letters) { handleStreamShortcut($0) }
             .onDeleteCommand {
                 deleteSelectedStream()
             }
@@ -1492,30 +1911,39 @@ struct StreamManagementView: View {
             Divider()
 
             HStack {
-                Button("Add stream", systemImage: "plus") { showingAddStream = true }
+                Button("Restore default list", role: .destructive) {
+                    showingResetConfirmation = true
+                }
                 Spacer()
+                Button("Add stream") { showingAddStream = true }
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
             .padding(.vertical, SettingsLayout.horizontalInset)
-            .padding(.leading, SettingsLayout.horizontalInset)
-            .padding(.trailing, SettingsLayout.horizontalInset + SettingsLayout.scrollbarReserve)
+                        .padding(.horizontal, SettingsLayout.horizontalInset)
         }
         .navigationTitle("Streams")
         .onAppear {
+            applyActiveFilter()
             DispatchQueue.main.async {
                 focusedTarget = .streamList
             }
         }
+        .onDisappear(perform: saveActiveFilter)
         .sheet(isPresented: $showingAddStream) {
-            StreamEditorView(title: "Add stream") { name, url in
-                try streamStore.add(name: name, url: url)
+            StreamEditorView(title: "Add stream") { name, url, category in
+                try streamStore.add(name: name, url: url, category: category)
             }
         }
         .sheet(isPresented: $showingEditStream) {
             if let stream = streamStore.selectedStream {
-                StreamEditorView(title: "Edit stream", stream: stream) { name, url in
-                    try streamStore.update(originalName: stream.name, name: name, url: url)
+                StreamEditorView(title: "Edit stream", stream: stream) { name, url, category in
+                    try streamStore.update(
+                        originalName: stream.name,
+                        name: name,
+                        url: url,
+                        category: category
+                    )
                 }
             }
         }
@@ -1525,7 +1953,16 @@ struct StreamManagementView: View {
         } message: {
             Text("This stream will be removed from the list.")
         }
+        .alert("Restore default stream list?", isPresented: $showingResetConfirmation) {
+            Button("Restore", role: .destructive) {
+                streamStore.resetToDefaults()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The default list of streams will be restored, including ordering and categorisation. Any changes you've made will be lost.")
+        }
     }
+
 
     private func deleteSelectedStream() {
         if skipDeleteConfirmation {
@@ -1537,43 +1974,82 @@ struct StreamManagementView: View {
 
     @ViewBuilder
     private func streamRow(_ stream: Stream) -> some View {
-        Text(stream.name)
-            .tag(Optional(stream.id))
-            .contextMenu {
-                Button("Edit") {
-                    streamStore.selectedStreamID = stream.id
-                    showingEditStream = true
-                }
-                Divider()
-                Button("Delete", role: .destructive) {
-                    streamStore.selectedStreamID = stream.id
-                    deleteSelectedStream()
-                }
+        HStack(spacing: 8) {
+            Text(stream.name)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if stream.isFavourite {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 18, height: 18)
+                    .accessibilityLabel("Favourite")
             }
+            Image(systemName: stream.category.iconName)
+                .font(.system(size: 14, weight: .medium))
+                .frame(width: 18, height: 18)
+                .accessibilityLabel(stream.category.title)
+        }
+        .tag(Optional(stream.id))
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button(stream.isFavourite ? "Unfavourite" : "Favourite") {
+                streamStore.selectedStreamID = stream.id
+                streamStore.toggleFavourite(stream.id)
+            }
+            Divider()
+            Button("Edit") {
+                streamStore.selectedStreamID = stream.id
+                showingEditStream = true
+            }
+            Divider()
+            Button("Delete", role: .destructive) {
+                streamStore.selectedStreamID = stream.id
+                deleteSelectedStream()
+            }
+        }
     }
 }
 
 struct StreamEditorView: View {
     @Environment(\.dismiss) private var dismiss
-    
+
     let title: String
-    let save: (String, String) throws -> Void
+    let save: (String, String, StreamCategory) throws -> Void
     @State private var name: String
     @State private var url: String
+    @State private var category: StreamCategory
     @State private var errorMessage: String?
-    
-    init(title: String, stream: Stream? = nil, save: @escaping (String, String) throws -> Void) {
+
+    init(
+        title: String,
+        stream: Stream? = nil,
+        save: @escaping (String, String, StreamCategory) throws -> Void
+    ) {
         self.title = title
         self.save = save
         _name = State(initialValue: stream?.name ?? "")
         _url = State(initialValue: stream?.url ?? "")
+        _category = State(initialValue: stream?.category ?? .television)
     }
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(title).font(.title2.bold())
             TextField("Choose a stream name (e.g. BBC World News Europe UHD)", text: $name)
             TextField("Paste a stream URL (.mpd or .m3u8 only)", text: $url)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Stream type")
+                    .font(.headline)
+
+                Picker("", selection: $category) {
+                    ForEach(StreamCategory.allCases) { category in
+                        Text(category.title).tag(category)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.radioGroup)
+                .horizontalRadioGroupLayout()
+            }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }
@@ -1593,10 +2069,10 @@ struct StreamEditorView: View {
             Text(errorMessage ?? "")
         }
     }
-    
+
     private func saveStream() {
         do {
-            try save(name, url)
+            try save(name, url, category)
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
@@ -1613,50 +2089,60 @@ struct SettingsView: View {
     @AppStorage("downloadDefaultSeconds") private var defaultSeconds = 0
     @AppStorage("encodeH265") private var encodeH265 = false
     @AppStorage("confirmDownloads") private var confirmDownloads = false
-    @AppStorage("revealFinishedVideo") private var revealFinishedVideo = false
+    @AppStorage("revealFinishedVideo") private var revealFinishedMedia = false
     @AppStorage("downloadAttempts") private var downloadAttempts = 3
     @AppStorage("retryDelay") private var retryDelay = 2.0
     @AppStorage("checkForUpdates") private var checkForUpdates = true
     @AppStorage("skipDeleteConfirmation") private var skipDeleteConfirmation = false
     @AppStorage("sequentialDownloads") private var sequentialDownloads = false
     @AppStorage("segmentDownloadLimit") private var segmentDownloadLimit = 5
+    @AppStorage("streamLaunchFilter") private var launchStreamFilter = "All"
+    @AppStorage("activeStreamCategoryFilter") private var activeStreamCategoryFilter = ""
+    @AppStorage("activeFavouritesOnly") private var activeFavouritesOnly = false
+    @State private var isShowingDefaultDurationEditor = false
+    @State private var settingsNeedsScrollbar = true
+    @State private var isSettingsScrollReady = false
     
+    private var streamFilterChoices: [String] {
+        ["All", "Favourites"] + StreamCategory.allCases.map(\.title)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Settings")
                         .font(.largeTitle.weight(.bold))
-                    
-                    SettingsSection(title: "Date display preference") {
-                        SettingsCard {
-                            HStack {
-                                Text("Date format")
-                                Spacer()
-                                SettingsPopupMenu(
-                                    values: DateFormats.choices.map(\.pattern),
-                                    selection: $dateFormat,
-                                    title: { pattern in
-                                        DateFormats.label(for: DateFormats.choices.first(where: { $0.pattern == pattern }) ?? DateFormats.choices[0])
-                                    }
-                                )
-                            }
-                            .frame(height: ControlMetrics.settingsRowHeight)
-                        }
-                    }
-                    
                     SettingsSection(title: "Download defaults") {
                         SettingsCard {
-                            HStack(alignment: .top) {
-                                Text("Default duration on app launch")
-                                    .padding(.top, 7)
+                            HStack {
+                                Text("Default download duration")
                                 Spacer()
-                                HStack(spacing: ControlMetrics.fieldGap) {
-                                    DurationControl(title: "Hours", value: $defaultHours, range: 0...350)
-                                    DurationControl(title: "Minutes", value: $defaultMinutes, range: 0...59)
-                                    DurationControl(title: "Seconds", value: $defaultSeconds, range: 0...59)
+                                Button("Set duration…") {
+                                    isShowingDefaultDurationEditor = true
+                                }
+                                .buttonStyle(HoverGlassButtonStyle(minimumHeight: 22))
+                                .popover(isPresented: $isShowingDefaultDurationEditor) {
+                                    VStack(alignment: .leading, spacing: 16) {
+                                        Text("Default duration")
+                                            .font(.headline)
+                                        HStack(spacing: ControlMetrics.fieldGap) {
+                                            DurationControl(title: "Hours", value: $defaultHours, range: 0...350)
+                                            DurationControl(title: "Minutes", value: $defaultMinutes, range: 0...59)
+                                            DurationControl(title: "Seconds", value: $defaultSeconds, range: 0...59)
+                                        }
+                                        HStack {
+                                            Spacer()
+                                            Button("Done") {
+                                                isShowingDefaultDurationEditor = false
+                                            }
+                                            .buttonStyle(.borderedProminent)
+                                        }
+                                    }
+                                    .padding(20)
                                 }
                             }
+                            .frame(height: ControlMetrics.settingsRowHeight)
                             Divider()
                             SettingsToggleRow("Encode to H.265 enabled by default", isOn: $encodeH265)
                             Divider()
@@ -1669,12 +2155,29 @@ struct SettingsView: View {
                             .frame(height: ControlMetrics.settingsRowHeight)
                         }
                     }
+
+                    SettingsSection(title: "Stream management") {
+                        SettingsCard {
+                            HStack {
+                                Text("Default stream filter")
+                                Spacer()
+                                SettingsPopupMenu(
+                                    values: streamFilterChoices,
+                                    selection: $launchStreamFilter,
+                                    title: { $0 }
+                                )
+                            }
+                            .frame(height: ControlMetrics.settingsRowHeight)
+                            Divider()
+                            SettingsToggleRow("Skip confirmation when deleting streams", isOn: $skipDeleteConfirmation)
+                        }
+                    }
                     
                     SettingsSection(title: "Download behaviour") {
                         SettingsCard {
                             SettingsToggleRow("Confirmation before starting a download", isOn: $confirmDownloads)
                             Divider()
-                            SettingsToggleRow("Play video when download completes", isOn: $revealFinishedVideo)
+                            SettingsToggleRow("Play media when download completes", isOn: $revealFinishedMedia)
                             Divider()
                             HStack {
                                 Text("Download segments")
@@ -1723,7 +2226,7 @@ struct SettingsView: View {
                             .frame(height: ControlMetrics.settingsRowHeight)
                             Divider()
                             HStack {
-                                Text("Seconds between attempts")
+                                Text("Time between attempts")
                                 Spacer()
                                 SettingsMenuPicker(
                                     values: Array(1...10),
@@ -1739,35 +2242,53 @@ struct SettingsView: View {
                             .frame(height: ControlMetrics.settingsRowHeight)
                         }
                     }
-                    SettingsSection(title: "Stream management") {
+                    SettingsSection(title: "Date display preference") {
                         SettingsCard {
-                            SettingsToggleRow("Skip confirmation when deleting streams", isOn: $skipDeleteConfirmation)
+                            HStack {
+                                Text("Date format")
+                                Spacer()
+                                SettingsPopupMenu(
+                                    values: DateFormats.choices.map(\.pattern),
+                                    selection: $dateFormat,
+                                    title: { pattern in
+                                        DateFormats.label(for: DateFormats.choices.first(where: { $0.pattern == pattern }) ?? DateFormats.choices[0])
+                                    }
+                                )
+                            }
+                            .frame(height: ControlMetrics.settingsRowHeight)
                         }
                     }
-                    
+
                     SettingsSection(title: "Updates") {
                         SettingsCard {
                             SettingsToggleRow("Check for updates on app launch", isOn: $checkForUpdates)
                         }
                     }
                 }
-                .frame(width: SettingsLayout.contentWidth, alignment: .leading)
-                .padding(.vertical, SettingsLayout.horizontalInset)
-                .padding(.leading, SettingsLayout.horizontalInset)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, SettingsLayout.horizontalInset)
+                .padding(.horizontal, SettingsLayout.horizontalInset)
+                .padding(.trailing, settingsNeedsScrollbar ? -SettingsLayout.scrollbarReserve : 0)
+                
             }
             .scrollIndicators(.visible)
-            
+            .background(PersistentListScroller { needsScrollbar in
+                settingsNeedsScrollbar = needsScrollbar
+                isSettingsScrollReady = true
+            })
+            .opacity(isSettingsScrollReady ? 1 : 0)
+
             Divider()
-            
+
             HStack {
-                Button("Reset all to default", action: resetToDefaults)
+                Button("Restore defaults", action: resetToDefaults)
                 Spacer()
                 Button("Done") { dismiss() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
             }
-            .padding()
+            .padding(.vertical, SettingsLayout.horizontalInset)
+            .padding(.horizontal, SettingsLayout.horizontalInset)
         }
         .frame(width: SettingsLayout.sheetWidth, height: SettingsLayout.sheetHeight)
         .onAppear(perform: prepareSettings)
@@ -1810,11 +2331,14 @@ struct SettingsView: View {
         defaultSeconds = 0
         encodeH265 = false
         confirmDownloads = false
-        revealFinishedVideo = false
+        revealFinishedMedia = false
         downloadAttempts = 3
         retryDelay = 2
         checkForUpdates = true
         skipDeleteConfirmation = false
+        launchStreamFilter = "All"
+        activeStreamCategoryFilter = ""
+        activeFavouritesOnly = false
         sequentialDownloads = false
         segmentDownloadLimit = 5
         downloadFolderPath = ""
@@ -1836,7 +2360,6 @@ private struct SettingsSection<Content: View>: View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title)
                 .font(.title3.weight(.semibold))
-                .padding(.horizontal, 8)
             content
         }
     }

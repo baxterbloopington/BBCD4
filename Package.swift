@@ -10,7 +10,14 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "BBCD4Mac",
-            resources: [.process("Resources")]
+            path: ".",
+            resources: [
+                .copy("Discord-Symbol-Black.svg"),
+                .copy("Discord-Symbol-White.svg"),
+                .copy("bbcd4_icon.icns"),
+                .copy("bbcd4_icon.png"),
+                .copy("default-streams.json")
+            ]
         ),
     ]
 )

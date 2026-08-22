@@ -1,14 +1,79 @@
 import Foundation
 
+enum StreamCategory: String, Codable, CaseIterable, Identifiable, Sendable {
+    case television
+    case radio
+    case liveStream
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .television:
+            "TV"
+        case .liveStream:
+            "Live stream"
+        case .radio:
+            "Radio"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .television:
+            "tv"
+        case .liveStream:
+            "dot.radiowaves.left.and.right"
+        case .radio:
+            "radio"
+        }
+    }
+
+    static func inferred(from url: String) -> StreamCategory {
+        let value = url.lowercased()
+        return value.contains("/audio/") || value.contains("bbc_radio") || value.contains("bbc_world_service")
+            ? .radio
+            : .television
+    }
+}
+
 struct Stream: Identifiable, Codable, Hashable, Sendable {
     var name: String
     var url: String
+    var category: StreamCategory
+    var isFavourite: Bool = false
 
     var id: String { name }
 }
 
+private struct StoredStream: Codable {
+    var url: String
+    var category: StreamCategory?
+    var isFavourite: Bool
+
+    init(url: String, category: StreamCategory?, isFavourite: Bool = false) {
+        self.url = url
+        self.category = category
+        self.isFavourite = isFavourite
+    }
+
+    init(from decoder: Decoder) throws {
+        if let url = try? decoder.singleValueContainer().decode(String.self) {
+            self.init(url: url, category: nil)
+            return
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            url: try container.decode(String.self, forKey: .url),
+            category: try container.decodeIfPresent(StreamCategory.self, forKey: .category),
+            isFavourite: try container.decodeIfPresent(Bool.self, forKey: .isFavourite) ?? false
+        )
+    }
+}
+
 private struct StoredStreams: Codable {
-    var streams: [String: String]
+    var streams: [String: StoredStream]
     var order: [String]?
 }
 
@@ -28,7 +93,7 @@ final class StreamStore: ObservableObject {
         streams.first { $0.id == selectedStreamID }
     }
 
-    func add(name: String, url: String) throws {
+    func add(name: String, url: String, category: StreamCategory) throws {
         let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -45,12 +110,12 @@ final class StreamStore: ObservableObject {
             throw StreamError.duplicateURL
         }
 
-        streams.append(Stream(name: cleanedName, url: cleanedURL))
+        streams.append(Stream(name: cleanedName, url: cleanedURL, category: category))
         selectedStreamID = cleanedName
         save()
     }
 
-    func update(originalName: String, name: String, url: String) throws {
+    func update(originalName: String, name: String, url: String, category: StreamCategory) throws {
         guard let index = streams.firstIndex(where: { $0.name == originalName }) else { return }
         let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -72,8 +137,25 @@ final class StreamStore: ObservableObject {
             throw StreamError.duplicateURL
         }
 
-        streams[index] = Stream(name: cleanedName, url: cleanedURL)
+        streams[index] = Stream(
+            name: cleanedName,
+            url: cleanedURL,
+            category: category,
+            isFavourite: streams[index].isFavourite
+        )
         selectedStreamID = cleanedName
+        save()
+    }
+
+    func toggleFavourite(_ id: String) {
+        guard let index = streams.firstIndex(where: { $0.id == id }) else { return }
+        streams[index].isFavourite.toggle()
+        save()
+    }
+
+    func setCategory(_ category: StreamCategory, for id: String) {
+        guard let index = streams.firstIndex(where: { $0.id == id }) else { return }
+        streams[index].category = category
         save()
     }
 
@@ -82,16 +164,9 @@ final class StreamStore: ObservableObject {
             return
         }
         streams.remove(at: index)
-        self.selectedStreamID = streams.indices.contains(index - 1)
-            ? streams[index - 1].id
-            : streams.first?.id
-        save()
-    }
-
-    func move(fromOffsets source: IndexSet, toOffset destination: Int) {
-        let movedIDs = source.compactMap { streams.indices.contains($0) ? streams[$0].id : nil }
-        streams.move(fromOffsets: source, toOffset: destination)
-        selectedStreamID = movedIDs.first
+        self.selectedStreamID = streams.indices.contains(index)
+            ? streams[index].id
+            : streams.last?.id
         save()
     }
 
@@ -116,6 +191,21 @@ final class StreamStore: ObservableObject {
         save()
     }
 
+    func resetToDefaults() {
+        guard let stored = loadBundledStreams() else { return }
+        let orderedNames = stored.order ?? Array(stored.streams.keys).sorted()
+        streams = orderedNames.compactMap { name in
+            stored.streams[name].map { Stream(
+                name: name,
+                url: $0.url,
+                category: $0.category ?? StreamCategory.inferred(from: $0.url),
+                isFavourite: $0.isFavourite
+            ) }
+        }
+        selectedStreamID = streams.first?.id
+        save()
+    }
+
     private func load() {
         let stored = loadStoredStreams(from: storageURL)
             ?? loadBundledStreams()
@@ -123,7 +213,12 @@ final class StreamStore: ObservableObject {
         let storedOrder = stored.order ?? UserDefaults.standard.stringArray(forKey: orderDefaultsKey)
         let orderedNames = storedOrder ?? Array(stored.streams.keys)
         streams = orderedNames.compactMap { name in
-            stored.streams[name].map { Stream(name: name, url: $0) }
+            stored.streams[name].map { Stream(
+                name: name,
+                url: $0.url,
+                category: $0.category ?? StreamCategory.inferred(from: $0.url),
+                isFavourite: $0.isFavourite
+            ) }
         }
         selectedStreamID = streams.first?.id
     }
@@ -131,7 +226,7 @@ final class StreamStore: ObservableObject {
     private func save() {
         UserDefaults.standard.set(streams.map(\.name), forKey: orderDefaultsKey)
         let stored = StoredStreams(
-            streams: Dictionary(uniqueKeysWithValues: streams.map { ($0.name, $0.url) }),
+            streams: Dictionary(uniqueKeysWithValues: streams.map { ($0.name, StoredStream(url: $0.url, category: $0.category, isFavourite: $0.isFavourite)) }),
             order: streams.map(\.name)
         )
         do {
@@ -173,8 +268,9 @@ final class StreamStore: ObservableObject {
         guard let url = URL(string: value), let scheme = url.scheme?.lowercased() else {
             return false
         }
+        let path = url.path.lowercased()
         return ["https", "http"].contains(scheme)
-            && (value.lowercased().hasSuffix(".mpd") || value.lowercased().hasSuffix(".m3u8"))
+            && (path.hasSuffix(".mpd") || path.hasSuffix(".m3u8"))
     }
 }
 
