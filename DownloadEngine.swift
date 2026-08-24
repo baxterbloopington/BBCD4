@@ -92,14 +92,26 @@ enum DownloadError: LocalizedError {
 @MainActor
 final class DownloadController: ObservableObject {
     @Published private(set) var status = "Ready"
-    @Published private(set) var progress = 0.0
-    @Published private(set) var isDownloading = false
+    @Published private(set) var progress = 0.0 {
+        didSet { updateDockProgress() }
+    }
+    @Published private(set) var isDownloading = false {
+        didSet { updateDockProgress() }
+    }
     @Published var completedOutput: URL?
     @Published var errorMessage: String?
     @Published var incompleteDownload: IncompleteDownload?
     private var activeTask: Task<Void, Never>?
     private var activeOperationID: UUID?
     private var activeIncompleteDownload: IncompleteDownload?
+
+    private func updateDockProgress() {
+        if isDownloading {
+            DockDownloadProgress.shared.show(progress: progress)
+        } else {
+            DockDownloadProgress.shared.hide()
+        }
+    }
 
     func start(_ request: DownloadRequest) {
         guard !isDownloading else { return }

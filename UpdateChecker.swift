@@ -1,19 +1,22 @@
 import Foundation
 
 private enum AppVersion {
-    static let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "3.0.1"
+    static let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "3.0.2"
 }
 
 struct AvailableRelease: Sendable {
     let version: String
     let url: URL
+    let notes: String
 }
 
 @MainActor
 final class UpdateChecker: ObservableObject {
     @Published private(set) var release: AvailableRelease?
 
+
     func check() async {
+
         guard let url = URL(string: "https://api.github.com/repos/baxterbloopington/BBCD4/releases/latest") else {
             return
         }
@@ -24,7 +27,11 @@ final class UpdateChecker: ObservableObject {
             let payload = try JSONDecoder().decode(ReleasePayload.self, from: data)
             let version = payload.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
             guard isNewer(version, than: AppVersion.current), let releaseURL = URL(string: payload.htmlURL) else { return }
-            release = AvailableRelease(version: version, url: releaseURL)
+            release = AvailableRelease(
+                version: version,
+                url: releaseURL,
+                notes: payload.body?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            )
         } catch {
             release = nil
         }
@@ -44,10 +51,12 @@ final class UpdateChecker: ObservableObject {
     private struct ReleasePayload: Decodable {
         let tagName: String
         let htmlURL: String
+        let body: String?
 
         enum CodingKeys: String, CodingKey {
             case tagName = "tag_name"
             case htmlURL = "html_url"
+            case body
         }
     }
 }

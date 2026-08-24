@@ -95,3 +95,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
 }
+
+@MainActor
+final class DockDownloadProgress {
+    static let shared = DockDownloadProgress()
+
+    private let progressView = DockDownloadProgressView()
+    private var isVisible = false
+
+    func show(progress: Double) {
+        let dockTile = NSApp.dockTile
+
+        if !isVisible {
+            progressView.frame = NSRect(origin: .zero, size: dockTile.size)
+            dockTile.contentView = progressView
+            isVisible = true
+        }
+
+        progressView.progress = min(1, max(0, progress))
+        dockTile.display()
+    }
+
+    func hide() {
+        guard isVisible else { return }
+
+        NSApp.dockTile.contentView = nil
+        NSApp.dockTile.display()
+        isVisible = false
+    }
+}
+
+private final class DockDownloadProgressView: NSView {
+    var progress = 0.0 {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSApp.applicationIconImage.draw(
+            in: bounds,
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1,
+            respectFlipped: true,
+            hints: [.interpolation: NSImageInterpolation.high]
+        )
+
+        let height = max(8, bounds.height * 0.150)
+        let horizontalInset = max(2, bounds.width * 0.015)
+        let track = NSRect(
+            x: horizontalInset,
+            y: bounds.height * 0.010,
+            width: bounds.width - (horizontalInset * 2),
+            height: height
+        )
+
+        let trackPath = NSBezierPath(roundedRect: track, xRadius: height / 2, yRadius: height / 2)
+        NSColor.black.withAlphaComponent(0.65).setFill()
+        trackPath.fill()
+        NSColor.white.withAlphaComponent(0.20).setStroke()
+        trackPath.lineWidth = 4
+        trackPath.stroke()
+
+        let completed = NSRect(
+            x: track.minX,
+            y: track.minY,
+            width: track.width * progress,
+            height: track.height
+        )
+        guard !completed.isEmpty else { return }
+
+        NSColor.systemBlue.setFill()
+        NSBezierPath(roundedRect: completed, xRadius: height / 2, yRadius: height / 2).fill()
+    }
+}

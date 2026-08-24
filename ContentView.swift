@@ -445,6 +445,7 @@ private struct BBCD4DialogModifier: ViewModifier {
     @Binding var isShowingUpdate: Bool
     let release: AvailableRelease?
 
+
     private var isDownloadCompletePresented: Binding<Bool> {
         Binding(
             get: { downloadController.completedOutput != nil },
@@ -466,7 +467,7 @@ private struct BBCD4DialogModifier: ViewModifier {
         )
     }
 
-    private var isUpdateAlertPresented: Binding<Bool> {
+    private var isUpdateSheetPresented: Binding<Bool> {
         Binding(
             get: { isShowingUpdate && release != nil },
             set: { if !$0 { isShowingUpdate = false } }
@@ -516,16 +517,9 @@ private struct BBCD4DialogModifier: ViewModifier {
             } message: {
                 Text(validationMessage ?? "")
             }
-            .alert("Update available!", isPresented: isUpdateAlertPresented) {
+            .sheet(isPresented: isUpdateSheetPresented) {
                 if let release {
-                    Button("View release on GitHub") {
-                        NSWorkspace.shared.open(release.url)
-                    }
-                }
-                Button("Later", role: .cancel) {}
-            } message: {
-                if let release {
-                    Text("Version \(release.version) is ready to download. Full details are available on GitHub.")
+                    UpdateReleaseNotesView(release: release)
                 }
             }
             .confirmationDialog("Cancel download?", isPresented: $isShowingCancelConfirmation, titleVisibility: .visible) {
@@ -592,6 +586,56 @@ private enum ControlMetrics {
     static var timeValueWidth: CGFloat { timeWidth - timeChevronHitWidth }
     static let durationWidth = (dateWidth + timeWidth - fieldGap) / 3
     static let durationRowWidth = durationWidth * 3 + fieldGap * 2
+}
+
+private struct UpdateReleaseNotesView: View {
+    let release: AvailableRelease
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Update available!")
+                    .font(.title2.weight(.bold))
+                Text("Version \(release.version) is ready to download.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(24)
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Release notes")
+                        .font(.headline)
+                    Text(release.notes.isEmpty ? "Full details are available on GitHub." : release.notes)
+                        .font(.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(24)
+            }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Later") {
+                    dismiss()
+                }
+                Button("View release on GitHub") {
+                    NSWorkspace.shared.open(release.url)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(20)
+        }
+        .frame(minWidth: 560, idealWidth: 620, maxWidth: 680, minHeight: 440, idealHeight: 540, maxHeight: 620)
+    }
 }
 
 private struct MainFormLabel: View {
