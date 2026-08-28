@@ -1,4 +1,21 @@
 import Foundation
+import UserNotifications
+
+enum DownloadFilenameFormat: String, CaseIterable, Sendable, Hashable {
+    case firstSegment, startDateTime, startTime
+    case currentDateTime, streamNameRandom, random
+
+    var title: String {
+        switch self {
+        case .firstSegment: "Stream name – first segment"
+        case .startDateTime: "Stream name – start date – start time"
+        case .startTime: "Stream name – start time"
+        case .currentDateTime: "Stream name – current date – current time"
+        case .streamNameRandom: "Stream name – random 10-character string"
+        case .random: "Random 10-character string"
+        }
+    }
+}
 
 struct DownloadRequest: Sendable {
     let stream: Stream
@@ -9,6 +26,7 @@ struct DownloadRequest: Sendable {
     let retryAttempts: Int
     let retryDelay: Double
     let maximumConcurrentSegments: Int
+    let filenameFormat: DownloadFilenameFormat
 }
 
 struct DownloadUpdate: Sendable {
@@ -89,6 +107,117 @@ enum DownloadError: LocalizedError {
     }
 }
 
+enum CompletionNotificationStyle: String, CaseIterable, Sendable, Hashable {
+    case inApp = "In-app"
+    case system = "System"
+    case both = "All"
+    case none = "None"
+
+    var usesInAppPopup: Bool {
+        self == .inApp || self == .both
+    }
+
+    var usesSystemNotification: Bool {
+        self == .system || self == .both
+    }
+}
+
+enum DownloadNotificationAction {
+    static let completionCategoryIdentifier = "download-complete"
+    static let showInFinderIdentifier = "show-in-finder"
+}
+
+@MainActor
+enum DownloadNotifications {
+    private static let preferenceKey = "downloadCompletionNotificationStyle"
+    private static let legacyPreferenceKey = "downloadNotifications"
+
+    static func migrateLegacyPreferenceIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: preferenceKey) == nil,
+              defaults.object(forKey: legacyPreferenceKey) != nil else {
+            return
+        }
+
+        let style: CompletionNotificationStyle =
+            defaults.bool(forKey: legacyPreferenceKey) ? .both : .inApp
+        defaults.set(style.rawValue, forKey: preferenceKey)
+        defaults.removeObject(forKey: legacyPreferenceKey)
+    }
+
+    private static var completionNotificationStyle: CompletionNotificationStyle {
+        migrateLegacyPreferenceIfNeeded()
+        return CompletionNotificationStyle(
+            rawValue: UserDefaults.standard.string(forKey: preferenceKey) ?? ""
+        ) ?? .inApp
+    }
+
+    static func requestPermission() {
+        guard completionNotificationStyle.usesSystemNotification else { return }
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let settings = await center.notificationSettings()
+            guard settings.authorizationStatus == .notDetermined else { return }
+            _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        }
+    }
+
+    static func postCompletion(request: DownloadRequest, output: URL) {
+        postSystemNotification(
+            title: "Download complete",
+            body: completionMessage(for: request),
+            userInfo: ["completedOutputPath": output.path],
+            categoryIdentifier: DownloadNotificationAction.completionCategoryIdentifier
+        )
+    }
+
+    static func completionMessage(for request: DownloadRequest) -> String {
+        "Successfully downloaded \(request.stream.name) for \(formattedDuration(request.duration)) on \(request.start.formatted(date: .abbreviated, time: .omitted))."
+    }
+
+    static func postIncomplete(failedSegmentCount: Int, totalSegmentCount: Int) {
+        postSystemNotification(
+            title: "Download incomplete",
+            body: "\(failedSegmentCount) of \(totalSegmentCount) segments could not be downloaded."
+        )
+    }
+
+    private static func formattedDuration(_ totalSeconds: Int) -> String {
+        let hours = totalSeconds / 3_600
+        let minutes = (totalSeconds % 3_600) / 60
+        let seconds = totalSeconds % 60
+
+        var components: [String] = []
+        if hours > 0 { components.append("\(hours)h") }
+        if minutes > 0 { components.append("\(minutes)m") }
+        if seconds > 0 || components.isEmpty { components.append("\(seconds)s") }
+        return components.joined(separator: " ")
+    }
+
+    private static func postSystemNotification(
+        title: String,
+        body: String,
+        userInfo: [String: String] = [:],
+        categoryIdentifier: String? = nil
+    ) {
+        guard completionNotificationStyle.usesSystemNotification else { return }
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let settings = await center.notificationSettings()
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            content.userInfo = userInfo
+            content.categoryIdentifier = categoryIdentifier ?? ""
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            try? await center.add(request)
+        }
+    }
+}
+
 @MainActor
 final class DownloadController: ObservableObject {
     @Published private(set) var status = "Ready"
@@ -99,6 +228,7 @@ final class DownloadController: ObservableObject {
         didSet { updateDockProgress() }
     }
     @Published var completedOutput: URL?
+    @Published var completedRequest: DownloadRequest?
     @Published var errorMessage: String?
     @Published var incompleteDownload: IncompleteDownload?
     private var activeTask: Task<Void, Never>?
@@ -115,6 +245,8 @@ final class DownloadController: ObservableObject {
 
     func start(_ request: DownloadRequest) {
         guard !isDownloading else { return }
+        completedOutput = nil
+        completedRequest = nil
         isDownloading = true
         progress = 0
         status = "Preparing download…"
@@ -127,14 +259,20 @@ final class DownloadController: ObservableObject {
                     await self.apply(update)
                 }
                 guard self.isCurrent(operationID) else { return }
+                completedRequest = request
                 completedOutput = output
                 progress = 1
                 status = "Done!"
+                DownloadNotifications.postCompletion(request: request, output: output)
                 finishOperation(operationID)
             } catch DownloadError.incomplete(let incomplete) {
                 guard self.isCurrent(operationID) else { return }
                 incompleteDownload = incomplete
                 status = "Download incomplete"
+                DownloadNotifications.postIncomplete(
+                    failedSegmentCount: incomplete.failedSegments.count,
+                    totalSegmentCount: incomplete.segments.count
+                )
                 finishOperation(operationID)
             } catch is CancellationError {
                 finishCancelled(operationID)
@@ -161,9 +299,11 @@ final class DownloadController: ObservableObject {
                     await self.apply(update)
                 }
                 guard self.isCurrent(operationID) else { return }
+                completedRequest = incomplete.request
                 completedOutput = output
                 progress = 1
                 status = "Done!"
+                DownloadNotifications.postCompletion(request: incomplete.request, output: output)
                 finishOperation(operationID)
             } catch is CancellationError {
                 finishCancelled(operationID)
@@ -191,14 +331,20 @@ final class DownloadController: ObservableObject {
                     await self.apply(update)
                 }
                 guard self.isCurrent(operationID) else { return }
+                completedRequest = incomplete.request
                 completedOutput = output
                 progress = 1
                 status = "Done!"
+                DownloadNotifications.postCompletion(request: incomplete.request, output: output)
                 finishOperation(operationID)
             } catch DownloadError.incomplete(let nextIncomplete) {
                 guard self.isCurrent(operationID) else { return }
                 incompleteDownload = nextIncomplete
                 status = "Download incomplete"
+                DownloadNotifications.postIncomplete(
+                    failedSegmentCount: nextIncomplete.failedSegments.count,
+                    totalSegmentCount: nextIncomplete.segments.count
+                )
                 finishOperation(operationID)
             } catch is CancellationError {
                 finishCancelled(operationID)
@@ -317,7 +463,7 @@ enum DownloadEngine {
         }
 
         try FileManager.default.createDirectory(at: request.outputFolder, withIntermediateDirectories: true)
-        var output = request.outputFolder.appendingPathComponent("\(safeFilename(request.stream.name))_\(startSegment).mp4")
+        var output = outputURL(for: request, firstSegment: startSegment, fileExtension: "mp4")
 
         if urlText.hasSuffix(".mpd") {
             await update(.init(status: "Checking stream…", progress: 0))
@@ -401,7 +547,7 @@ enum DownloadEngine {
                 let audioSegments = Array(startSegment...endSegment)
                 let segmentStart = availabilityStartTime.addingTimeInterval(Double(startSegment - audio.startNumber) * segmentDuration)
                 let trimOffset = max(0, request.start.timeIntervalSince(segmentStart))
-                output = request.outputFolder.appendingPathComponent("\(safeFilename(request.stream.name))_\(startSegment).m4a")
+                output = outputURL(for: request, firstSegment: startSegment, fileExtension: "m4a")
 
                 await update(.init(status: "Preparing download…", progress: 0))
                 try await fetch(audio.initialization, to: workspace.appendingPathComponent("audio.init"), request: request)
@@ -477,9 +623,11 @@ enum DownloadEngine {
             let hlsSegments = Array(startHLSegment...endHLSegment)
             let segmentStart = playlist.referenceStart.addingTimeInterval(Double(startHLSegment - playlist.referenceSegment) * playlist.segmentDuration)
             let trimOffset = max(0, request.start.timeIntervalSince(segmentStart))
-            if request.stream.category == .radio {
-                output = request.outputFolder.appendingPathComponent("\(safeFilename(request.stream.name))_\(startHLSegment).m4a")
-            }
+            output = outputURL(
+                for: request,
+                firstSegment: startHLSegment,
+                fileExtension: request.stream.category == .radio ? "m4a" : "mp4"
+            )
             let failures = try await fetchSegments(hlsSegments, maximumConcurrent: request.maximumConcurrentSegments, update: update) { segment in
                 try await fetch(segmentURL(playlist.media, number: segment), to: workspace.appendingPathComponent("\(segment).ts"), request: request)
             }
@@ -1136,6 +1284,67 @@ enum DownloadEngine {
             }
             return timestamps
         }
+    }
+
+    private static func outputURL(
+        for request: DownloadRequest,
+        firstSegment: Int,
+        fileExtension: String
+    ) -> URL {
+        let streamName = safeFilename(request.stream.name)
+        let now = Date()
+        let startDate = filenameDate(request.start)
+        let startTime = filenameTime(request.start)
+        let currentDate = filenameDate(now)
+        let currentTime = filenameTime(now)
+        let random = randomFilenameString()
+
+        let baseName: String
+        switch request.filenameFormat {
+        case .firstSegment:
+            baseName = "\(streamName)_\(firstSegment)"
+        case .startDateTime:
+            baseName = "\(streamName)_\(startDate)_\(startTime)"
+        case .startTime:
+            baseName = "\(streamName)_\(startTime)"
+        case .currentDateTime:
+            baseName = "\(streamName)_\(currentDate)_\(currentTime)"
+        case .streamNameRandom:
+            baseName = "\(streamName)_\(random)"
+        case .random:
+            baseName = random
+        }
+
+        return uniqueOutputURL(in: request.outputFolder, baseName: baseName, fileExtension: fileExtension)
+    }
+
+    private static func uniqueOutputURL(in folder: URL, baseName: String, fileExtension: String) -> URL {
+        var candidate = folder.appendingPathComponent(baseName).appendingPathExtension(fileExtension)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = folder.appendingPathComponent("\(baseName)_\(suffix)").appendingPathExtension(fileExtension)
+            suffix += 1
+        }
+        return candidate
+    }
+
+    private static func filenameDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private static func filenameTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HHmmss"
+        return formatter.string(from: date)
+    }
+
+    private static func randomFilenameString() -> String {
+        let characters = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+        return String((0..<10).compactMap { _ in characters.randomElement() })
     }
 
     private static func safeFilename(_ name: String) -> String {

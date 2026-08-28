@@ -1,5 +1,28 @@
 import AppKit
 import SwiftUI
+
+private enum AppAppearance: String, CaseIterable, Hashable {
+    case system
+    case light
+    case dark
+
+    var title: String {
+        switch self {
+        case .system: "System"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
+        }
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject private var streamStore: StreamStore
     @Environment(\.colorScheme) private var colorScheme
@@ -9,7 +32,6 @@ struct ContentView: View {
     @AppStorage("downloadDefaultSeconds") private var defaultSeconds = 0
     @AppStorage("dateFormat") private var dateFormat = "dd/MM/yyyy"
     @AppStorage("downloadFolder") private var downloadFolderPath = ""
-    @AppStorage("confirmDownloads") private var confirmDownloads = false
     @AppStorage("revealFinishedVideo") private var revealFinishedMedia = false
     @AppStorage("checkForUpdates") private var checkForUpdates = true
     @AppStorage("downloadAttempts") private var downloadAttempts = 3
@@ -19,6 +41,10 @@ struct ContentView: View {
     @AppStorage("streamLaunchFilter") private var launchStreamFilter = "All"
     @AppStorage("activeStreamCategoryFilter") private var activeStreamCategoryFilter = ""
     @AppStorage("activeFavouritesOnly") private var activeFavouritesOnly = false
+    @AppStorage("downloadFilenameFormat") private var downloadFilenameFormat = DownloadFilenameFormat.startDateTime.rawValue
+    @AppStorage("appearanceMode") private var appearanceMode = AppAppearance.system.rawValue
+    @AppStorage("downloadCompletionNotificationStyle")
+    private var completionNotificationStyle = CompletionNotificationStyle.inApp.rawValue
     
     @State private var startDate = Date()
     @State private var hours = 0
@@ -32,7 +58,6 @@ struct ContentView: View {
     @State private var isShowingSettings = false
     @State private var isShowingUpdate = false
     @State private var isShowingCancelConfirmation = false
-    @State private var pendingDownload: DownloadRequest?
     @StateObject private var updateChecker = UpdateChecker()
     @ObservedObject private var downloadController: DownloadController
     
@@ -46,6 +71,10 @@ struct ContentView: View {
             (!activeFavouritesOnly || stream.isFavourite)
                 && (category == nil || stream.category == category)
         }
+    }
+
+    private var completionNotificationPreference: CompletionNotificationStyle {
+        CompletionNotificationStyle(rawValue: completionNotificationStyle) ?? .inApp
     }
 
     private func applyLaunchFilterToActiveFilter() {
@@ -139,9 +168,9 @@ struct ContentView: View {
                     .frame(width: ControlMetrics.durationWidth, height: ControlMetrics.height)
                     .disabled(!downloadController.isDownloading && (streamStore.selectedStream == nil || duration == 0))
                     if !selectedStreamIsRadio {
-                        Toggle("Encode to H.265", isOn: $encodeH265)
+                        Toggle("Encode", isOn: $encodeH265)
                             .toggleStyle(.checkbox)
-                            .hoverHint("Improves video compatibility with Apple devices.\nEncoding can be a very slow process.")
+                            .hoverHint("Encode to H.265 for better compatibility with Apple devices.\nThis can be a slow process.")
                     }
                     Spacer()
                     HStack(spacing: ControlMetrics.iconButtonGap) {
@@ -209,6 +238,10 @@ struct ContentView: View {
             SettingsView()
         }
         .onAppear {
+            DownloadNotifications.migrateLegacyPreferenceIfNeeded()
+            completionNotificationStyle = UserDefaults.standard.string(
+                forKey: "downloadCompletionNotificationStyle"
+            ) ?? CompletionNotificationStyle.inApp.rawValue
             applyLaunchFilterToActiveFilter()
             applyDefaultDuration()
             syncDateInputs()
@@ -222,9 +255,21 @@ struct ContentView: View {
         .onChange(of: defaultMinutes) { _, _ in applyDefaultDuration() }
         .onChange(of: defaultSeconds) { _, _ in applyDefaultDuration() }
         .onChange(of: downloadController.completedOutput) { _, output in
-            if revealFinishedMedia, let output {
+            guard let output else { return }
+            if revealFinishedMedia {
                 NSWorkspace.shared.open(output)
                 downloadController.completedOutput = nil
+                downloadController.completedRequest = nil
+            } else if !completionNotificationPreference.usesInAppPopup {
+                downloadController.completedOutput = nil
+                downloadController.completedRequest = nil
+            }
+        }
+        .onChange(of: completionNotificationStyle) { _, rawValue in
+            let style = CompletionNotificationStyle(rawValue: rawValue) ?? .inApp
+            if !style.usesInAppPopup {
+                downloadController.completedOutput = nil
+                downloadController.completedRequest = nil
             }
         }
         .task {
@@ -232,6 +277,7 @@ struct ContentView: View {
                 await updateChecker.check()
             }
         }
+        .preferredColorScheme((AppAppearance(rawValue: appearanceMode) ?? .system).colorScheme)
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded {
             NSApp.keyWindow?.makeFirstResponder(nil)
@@ -240,9 +286,9 @@ struct ContentView: View {
             downloadController: downloadController,
             validationMessage: $validationMessage,
             isShowingCancelConfirmation: $isShowingCancelConfirmation,
-            pendingDownload: $pendingDownload,
             isShowingUpdate: $isShowingUpdate,
-            release: updateChecker.release
+            release: updateChecker.release,
+            completionNotificationStyle: completionNotificationStyle
         ))
     }
     
@@ -302,13 +348,10 @@ struct ContentView: View {
             encodeH265: encodeH265,
             retryAttempts: max(1, min(10, downloadAttempts)),
             retryDelay: max(1, min(10, retryDelay)),
-            maximumConcurrentSegments: sequentialDownloads ? 1 : max(1, min(50, segmentDownloadLimit))
+            maximumConcurrentSegments: sequentialDownloads ? 1 : max(1, min(50, segmentDownloadLimit)),
+            filenameFormat: DownloadFilenameFormat(rawValue: downloadFilenameFormat) ?? .firstSegment
         )
-        if confirmDownloads {
-            pendingDownload = request
-        } else {
-            downloadController.start(request)
-        }
+        downloadController.start(request)
     }
     
     private func syncDateInputs() {
@@ -441,15 +484,26 @@ private struct BBCD4DialogModifier: ViewModifier {
     @ObservedObject var downloadController: DownloadController
     @Binding var validationMessage: String?
     @Binding var isShowingCancelConfirmation: Bool
-    @Binding var pendingDownload: DownloadRequest?
     @Binding var isShowingUpdate: Bool
     let release: AvailableRelease?
+    let completionNotificationStyle: String
 
+    private var completionNotificationPreference: CompletionNotificationStyle {
+        CompletionNotificationStyle(rawValue: completionNotificationStyle) ?? .inApp
+    }
 
     private var isDownloadCompletePresented: Binding<Bool> {
         Binding(
-            get: { downloadController.completedOutput != nil },
-            set: { if !$0 { downloadController.completedOutput = nil } }
+            get: {
+                completionNotificationPreference.usesInAppPopup &&
+                    downloadController.completedOutput != nil
+            },
+            set: {
+                if !$0 {
+                    downloadController.completedOutput = nil
+                    downloadController.completedRequest = nil
+                }
+            }
         )
     }
 
@@ -471,13 +525,6 @@ private struct BBCD4DialogModifier: ViewModifier {
         Binding(
             get: { isShowingUpdate && release != nil },
             set: { if !$0 { isShowingUpdate = false } }
-        )
-    }
-
-    private var isDownloadConfirmationPresented: Binding<Bool> {
-        Binding(
-            get: { pendingDownload != nil },
-            set: { if !$0 { pendingDownload = nil } }
         )
     }
 
@@ -505,7 +552,9 @@ private struct BBCD4DialogModifier: ViewModifier {
                 }
                 Button("OK", role: .cancel) {}
             } message: {
-                Text("Saved to \(downloadController.completedOutput?.path ?? "")")
+                Text(downloadController.completedRequest.map {
+                    DownloadNotifications.completionMessage(for: $0)
+                } ?? "")
             }
             .alert("Download failed", isPresented: isDownloadErrorPresented) {
                 Button("OK", role: .cancel) {}
@@ -530,32 +579,6 @@ private struct BBCD4DialogModifier: ViewModifier {
             } message: {
                 Text("The current download will be cancelled.")
             }
-            .confirmationDialog("Start download?", isPresented: isDownloadConfirmationPresented, titleVisibility: .visible) {
-                Button("Download") {
-                    if let request = pendingDownload {
-                        downloadController.start(request)
-                    }
-                    pendingDownload = nil
-                }
-                Button("Cancel", role: .cancel) { pendingDownload = nil }
-            } message: {
-                if let request = pendingDownload {
-                    Text("Download \(request.stream.name) for \(durationDescription(for: request.duration))?")
-                }
-            }
-    }
-
-    private func durationDescription(for totalSeconds: Int) -> String {
-        let values = [
-            (totalSeconds / 3_600, "hour"),
-            ((totalSeconds % 3_600) / 60, "minute"),
-            (totalSeconds % 60, "second")
-        ]
-        let parts = values.compactMap { value, unit -> String? in
-            guard value > 0 else { return nil }
-            return "\(value) \(unit)\(value == 1 ? "" : "s")"
-        }
-        return parts.isEmpty ? "0 seconds" : parts.joined(separator: " ")
     }
 }
 
@@ -2132,7 +2155,6 @@ struct SettingsView: View {
     @AppStorage("downloadDefaultMinutes") private var defaultMinutes = 1
     @AppStorage("downloadDefaultSeconds") private var defaultSeconds = 0
     @AppStorage("encodeH265") private var encodeH265 = false
-    @AppStorage("confirmDownloads") private var confirmDownloads = false
     @AppStorage("revealFinishedVideo") private var revealFinishedMedia = false
     @AppStorage("downloadAttempts") private var downloadAttempts = 3
     @AppStorage("retryDelay") private var retryDelay = 2.0
@@ -2143,12 +2165,37 @@ struct SettingsView: View {
     @AppStorage("streamLaunchFilter") private var launchStreamFilter = "All"
     @AppStorage("activeStreamCategoryFilter") private var activeStreamCategoryFilter = ""
     @AppStorage("activeFavouritesOnly") private var activeFavouritesOnly = false
+    @AppStorage("downloadFilenameFormat") private var downloadFilenameFormat = DownloadFilenameFormat.firstSegment.rawValue
+    @AppStorage("appearanceMode") private var appearanceMode = AppAppearance.system.rawValue
+    @AppStorage("downloadCompletionNotificationStyle")
+    private var completionNotificationStyle = CompletionNotificationStyle.inApp.rawValue
     @State private var isShowingDefaultDurationEditor = false
     @State private var settingsNeedsScrollbar = true
     @State private var isSettingsScrollReady = false
     
     private var streamFilterChoices: [String] {
         ["All", "Favourites"] + StreamCategory.allCases.map(\.title)
+    }
+
+    private var filenameFormatBinding: Binding<DownloadFilenameFormat> {
+        Binding(
+            get: { DownloadFilenameFormat(rawValue: downloadFilenameFormat) ?? .firstSegment },
+            set: { downloadFilenameFormat = $0.rawValue }
+        )
+    }
+
+    private var appearanceBinding: Binding<AppAppearance> {
+        Binding(
+            get: { AppAppearance(rawValue: appearanceMode) ?? .system },
+            set: { appearanceMode = $0.rawValue }
+        )
+    }
+
+    private var completionNotificationStyleBinding: Binding<CompletionNotificationStyle> {
+        Binding(
+            get: { CompletionNotificationStyle(rawValue: completionNotificationStyle) ?? .inApp },
+            set: { completionNotificationStyle = $0.rawValue }
+        )
     }
 
     var body: some View {
@@ -2159,6 +2206,14 @@ struct SettingsView: View {
                         .font(.largeTitle.weight(.bold))
                     SettingsSection(title: "Download defaults") {
                         SettingsCard {
+                            HStack {
+                                Text("Download folder")
+                                Spacer()
+                                Button("Choose folder…", action: chooseDownloadFolder)
+                                    .buttonStyle(HoverGlassButtonStyle(minimumHeight: 22))
+                            }
+                            .frame(height: ControlMetrics.settingsRowHeight)
+                            Divider()
                             HStack {
                                 Text("Default download duration")
                                 Spacer()
@@ -2191,10 +2246,13 @@ struct SettingsView: View {
                             SettingsToggleRow("Encode to H.265 enabled by default", isOn: $encodeH265)
                             Divider()
                             HStack {
-                                Text("Download folder")
+                                Text("File name format")
                                 Spacer()
-                                Button("Choose folder…", action: chooseDownloadFolder)
-                                    .buttonStyle(HoverGlassButtonStyle(minimumHeight: 22))
+                                SettingsPopupMenu(
+                                    values: DownloadFilenameFormat.allCases,
+                                    selection: filenameFormatBinding,
+                                    title: { $0.title }
+                                )
                             }
                             .frame(height: ControlMetrics.settingsRowHeight)
                         }
@@ -2219,9 +2277,24 @@ struct SettingsView: View {
                     
                     SettingsSection(title: "Download behaviour") {
                         SettingsCard {
-                            SettingsToggleRow("Confirmation before starting a download", isOn: $confirmDownloads)
-                            Divider()
                             SettingsToggleRow("Play media when download completes", isOn: $revealFinishedMedia)
+                            Divider()
+                            HStack {
+                                Text("Download status notifications")
+                                Spacer()
+                                SettingsPopupMenu(
+                                    values: CompletionNotificationStyle.allCases,
+                                    selection: completionNotificationStyleBinding,
+                                    title: { $0.rawValue }
+                                )
+                            }
+                            .frame(height: ControlMetrics.settingsRowHeight)
+        .onChange(of: completionNotificationStyle) { _, rawValue in
+            let style = CompletionNotificationStyle(rawValue: rawValue) ?? .inApp
+            if style.usesSystemNotification {
+                DownloadNotifications.requestPermission()
+            }
+        }
                             Divider()
                             HStack {
                                 Text("Download segments")
@@ -2286,7 +2359,7 @@ struct SettingsView: View {
                             .frame(height: ControlMetrics.settingsRowHeight)
                         }
                     }
-                    SettingsSection(title: "Date display preference") {
+                    SettingsSection(title: "Date display") {
                         SettingsCard {
                             HStack {
                                 Text("Date format")
@@ -2297,6 +2370,21 @@ struct SettingsView: View {
                                     title: { pattern in
                                         DateFormats.label(for: DateFormats.choices.first(where: { $0.pattern == pattern }) ?? DateFormats.choices[0])
                                     }
+                                )
+                            }
+                            .frame(height: ControlMetrics.settingsRowHeight)
+                        }
+                    }
+
+                    SettingsSection(title: "Appearance") {
+                        SettingsCard {
+                            HStack {
+                                Text("Theme")
+                                Spacer()
+                                SettingsPopupMenu(
+                                    values: AppAppearance.allCases,
+                                    selection: appearanceBinding,
+                                    title: { $0.title }
                                 )
                             }
                             .frame(height: ControlMetrics.settingsRowHeight)
@@ -2366,6 +2454,15 @@ struct SettingsView: View {
         if !(1...10).contains(Int(retryDelay.rounded())) {
             retryDelay = 2
         }
+        if DownloadFilenameFormat(rawValue: downloadFilenameFormat) == nil {
+            downloadFilenameFormat = DownloadFilenameFormat.firstSegment.rawValue
+        }
+        if AppAppearance(rawValue: appearanceMode) == nil {
+            appearanceMode = AppAppearance.system.rawValue
+        }
+        if CompletionNotificationStyle(rawValue: completionNotificationStyle) == nil {
+            completionNotificationStyle = CompletionNotificationStyle.inApp.rawValue
+        }
     }
     
     private func resetToDefaults() {
@@ -2374,7 +2471,6 @@ struct SettingsView: View {
         defaultMinutes = 1
         defaultSeconds = 0
         encodeH265 = false
-        confirmDownloads = false
         revealFinishedMedia = false
         downloadAttempts = 3
         retryDelay = 2
@@ -2386,9 +2482,16 @@ struct SettingsView: View {
         sequentialDownloads = false
         segmentDownloadLimit = 5
         downloadFolderPath = ""
+        downloadFilenameFormat = DownloadFilenameFormat.firstSegment.rawValue
+        appearanceMode = AppAppearance.system.rawValue
+        completionNotificationStyle = CompletionNotificationStyle.inApp.rawValue
     }
     
     private func prepareSettings() {
+        DownloadNotifications.migrateLegacyPreferenceIfNeeded()
+        completionNotificationStyle = UserDefaults.standard.string(
+            forKey: "downloadCompletionNotificationStyle"
+        ) ?? CompletionNotificationStyle.inApp.rawValue
         normaliseMenuSettings()
         DispatchQueue.main.async {
             NSApp.keyWindow?.makeFirstResponder(nil)
@@ -2593,6 +2696,13 @@ private final class SettingsPopupControl: NSControl {
     
     override func mouseExited(with event: NSEvent) {
         isHovered = false
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        // Scrolling does not move the pointer, so there is no mouse-exit event
+        // to clear the custom hover state as the settings move underneath it.
+        isHovered = false
+        super.scrollWheel(with: event)
     }
     
     override func mouseDown(with event: NSEvent) {

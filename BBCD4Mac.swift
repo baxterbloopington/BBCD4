@@ -1,14 +1,72 @@
 import AppKit
+import Darwin
 import SwiftUI
+import UserNotifications
 
 @main
 struct BBCD4Mac {
     static func main() {
+        let isAppBundle = Bundle.main.bundleURL.pathExtension.lowercased() == "app"
+
+        if isAppBundle,
+           let bundleIdentifier = Bundle.main.bundleIdentifier,
+           !SingleInstance.claim(bundleIdentifier: bundleIdentifier) {
+            SingleInstance.activateExistingApp()
+            exit(0)
+        }
+
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
+        let showInFinderAction = UNNotificationAction(
+            identifier: DownloadNotificationAction.showInFinderIdentifier,
+            title: "Show in Finder",
+            options: []
+        )
+        let completionCategory = UNNotificationCategory(
+            identifier: DownloadNotificationAction.completionCategoryIdentifier,
+            actions: [showInFinderAction],
+            intentIdentifiers: [],
+            options: []
+        )
+        UNUserNotificationCenter.current().setNotificationCategories([completionCategory])
+        if isAppBundle {
+            UNUserNotificationCenter.current().delegate = delegate
+        }
         app.setActivationPolicy(.regular)
         app.run()
+    }
+}
+
+private enum SingleInstance {
+    static let activationNotification = Notification.Name("uk.co.bbcd4.activateExistingInstance")
+    private nonisolated(unsafe) static var lockFileDescriptor: Int32 = -1
+
+    static func claim(bundleIdentifier: String) -> Bool {
+        let fileManager = FileManager.default
+        let supportDirectory = fileManager
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+        try? fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+
+        let lockURL = supportDirectory.appendingPathComponent("instance.lock")
+        let descriptor = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { return true }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            close(descriptor)
+            return false
+        }
+
+        lockFileDescriptor = descriptor
+        return true
+    }
+
+    static func activateExistingApp() {
+        DistributedNotificationCenter.default().post(
+            name: activationNotification,
+            object: nil,
+            userInfo: nil
+        )
     }
 }
 
@@ -19,6 +77,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let downloadController = DownloadController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(activateExistingApp),
+            name: SingleInstance.activationNotification,
+            object: nil,
+            suspensionBehavior: .deliverImmediately
+        )
+
         installMainMenu()
         let rootView = ContentView(downloadController: downloadController)
             .environmentObject(streamStore)
@@ -38,6 +104,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeFirstResponder(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
+    }
+
+    @objc private func activateExistingApp() {
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func installMainMenu() {
@@ -72,12 +143,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         true
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        activateExistingApp()
+        return true
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        confirmCancellationBeforeQuitting()
+        return confirmCancellationBeforeQuitting()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        confirmCancellationBeforeQuitting() ? .terminateNow : .terminateCancel
+        return confirmCancellationBeforeQuitting() ? .terminateNow : .terminateCancel
     }
 
     private func confirmCancellationBeforeQuitting() -> Bool {
@@ -93,6 +169,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard alert.runModal() == .alertFirstButtonReturn else { return false }
         downloadController.cancelCurrentDownload()
         return true
+    }
+}
+
+extension AppDelegate: UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        guard response.actionIdentifier == DownloadNotificationAction.showInFinderIdentifier else {
+            completionHandler()
+            return
+        }
+
+        let completedOutputPath = response.notification.request.content.userInfo["completedOutputPath"] as? String
+        Task { @MainActor in
+            if let completedOutputPath,
+               FileManager.default.fileExists(atPath: completedOutputPath) {
+                NSWorkspace.shared.activateFileViewerSelecting([
+                    URL(fileURLWithPath: completedOutputPath)
+                ])
+            }
+        }
+        completionHandler()
     }
 }
 
