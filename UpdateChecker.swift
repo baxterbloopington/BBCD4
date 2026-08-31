@@ -1,7 +1,7 @@
 import Foundation
 
 private enum AppVersion {
-    static let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "3.1"
+    static let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "4.0"
 }
 
 struct AvailableRelease: Sendable {

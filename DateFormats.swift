@@ -45,10 +45,6 @@ enum DateFormats {
         !pattern.contains("MMM")
     }
 
-    static func numericPlaceholder(for pattern: String) -> String {
-        supportsNumericEntry(for: pattern) ? pattern.replacingOccurrences(of: "y", with: "Y") : "Enter date"
-    }
-
     static func sanitizedNumericInput(_ input: String, format pattern: String) -> String {
         guard supportsNumericEntry(for: pattern) else { return input }
 

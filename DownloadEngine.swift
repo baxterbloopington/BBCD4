@@ -1,7 +1,7 @@
 import Foundation
 import UserNotifications
 
-enum DownloadFilenameFormat: String, CaseIterable, Sendable, Hashable {
+enum DownloadFilenameFormat: String, CaseIterable, Sendable, Hashable, Codable {
     case firstSegment, startDateTime, startTime
     case currentDateTime, streamNameRandom, random
 
@@ -17,7 +17,7 @@ enum DownloadFilenameFormat: String, CaseIterable, Sendable, Hashable {
     }
 }
 
-struct DownloadRequest: Sendable {
+struct DownloadRequest: Sendable, Codable {
     let stream: Stream
     let start: Date
     let duration: Int
@@ -27,6 +27,16 @@ struct DownloadRequest: Sendable {
     let retryDelay: Double
     let maximumConcurrentSegments: Int
     let filenameFormat: DownloadFilenameFormat
+}
+
+struct QueuedDownload: Identifiable, Codable, Sendable {
+    let id: UUID
+    let request: DownloadRequest
+
+    init(id: UUID = UUID(), request: DownloadRequest) {
+        self.id = id
+        self.request = request
+    }
 }
 
 struct DownloadUpdate: Sendable {
@@ -107,7 +117,7 @@ enum DownloadError: LocalizedError {
     }
 }
 
-enum CompletionNotificationStyle: String, CaseIterable, Sendable, Hashable {
+enum NotificationDelivery: String, CaseIterable, Sendable, Hashable {
     case inApp = "In-app"
     case system = "System"
     case both = "All"
@@ -122,6 +132,24 @@ enum CompletionNotificationStyle: String, CaseIterable, Sendable, Hashable {
     }
 }
 
+enum NotificationEventDelivery: String, CaseIterable, Sendable, Hashable {
+    case useDefault = "Use default"
+    case inApp = "In-app"
+    case system = "System"
+    case both = "All"
+    case none = "None"
+
+    func resolved(using defaultDelivery: NotificationDelivery) -> NotificationDelivery {
+        switch self {
+        case .useDefault: defaultDelivery
+        case .inApp: .inApp
+        case .system: .system
+        case .both: .both
+        case .none: .none
+        }
+    }
+}
+
 enum DownloadNotificationAction {
     static let completionCategoryIdentifier = "download-complete"
     static let showInFinderIdentifier = "show-in-finder"
@@ -129,31 +157,76 @@ enum DownloadNotificationAction {
 
 @MainActor
 enum DownloadNotifications {
-    private static let preferenceKey = "downloadCompletionNotificationStyle"
+    private static let preferenceKey = "downloadNotificationDelivery"
+    private static let previousPreferenceKey = "downloadCompletionNotificationStyle"
     private static let legacyPreferenceKey = "downloadNotifications"
+    private static let startPreferenceKey = "downloadStartNotificationDelivery"
+    private static let completionPreferenceKey = "downloadCompletionNotificationDelivery"
+    private static let failurePreferenceKey = "downloadFailureNotificationDelivery"
+    private static let legacyStartPreferenceKey = "showDownloadStartNotification"
+    private static let legacyCompletionPreferenceKey = "showDownloadCompletionNotification"
+    private static let legacyFailurePreferenceKey = "showDownloadFailureNotification"
+    private static let startInAppPreferenceKey = "downloadStartInAppNotification"
+    private static let startSystemPreferenceKey = "downloadStartSystemNotification"
+    private static let completionInAppPreferenceKey = "downloadCompletionInAppNotification"
+    private static let completionSystemPreferenceKey = "downloadCompletionSystemNotification"
+    private static let failureInAppPreferenceKey = "downloadFailureInAppNotification"
+    private static let failureSystemPreferenceKey = "downloadFailureSystemNotification"
 
     static func migrateLegacyPreferenceIfNeeded() {
         let defaults = UserDefaults.standard
-        guard defaults.object(forKey: preferenceKey) == nil,
-              defaults.object(forKey: legacyPreferenceKey) != nil else {
-            return
+        if defaults.object(forKey: preferenceKey) == nil {
+            if let previousValue = defaults.string(forKey: previousPreferenceKey),
+               NotificationDelivery(rawValue: previousValue) != nil {
+                defaults.set(previousValue, forKey: preferenceKey)
+            } else if defaults.object(forKey: legacyPreferenceKey) != nil {
+                let delivery: NotificationDelivery = defaults.bool(forKey: legacyPreferenceKey) ? .both : .inApp
+                defaults.set(delivery.rawValue, forKey: preferenceKey)
+                defaults.removeObject(forKey: legacyPreferenceKey)
+            }
         }
 
-        let style: CompletionNotificationStyle =
-            defaults.bool(forKey: legacyPreferenceKey) ? .both : .inApp
-        defaults.set(style.rawValue, forKey: preferenceKey)
-        defaults.removeObject(forKey: legacyPreferenceKey)
+        migrateChannelPreferences(
+            inAppKey: startInAppPreferenceKey,
+            systemKey: startSystemPreferenceKey,
+            eventDeliveryKey: startPreferenceKey,
+            legacyKey: legacyStartPreferenceKey,
+            defaultDelivery: .inApp
+        )
+        migrateChannelPreferences(
+            inAppKey: completionInAppPreferenceKey,
+            systemKey: completionSystemPreferenceKey,
+            eventDeliveryKey: completionPreferenceKey,
+            legacyKey: legacyCompletionPreferenceKey,
+            defaultDelivery: .useDefault
+        )
+        migrateChannelPreferences(
+            inAppKey: failureInAppPreferenceKey,
+            systemKey: failureSystemPreferenceKey,
+            eventDeliveryKey: failurePreferenceKey,
+            legacyKey: legacyFailurePreferenceKey,
+            defaultDelivery: .useDefault
+        )
     }
 
-    private static var completionNotificationStyle: CompletionNotificationStyle {
+    private static var notificationDelivery: NotificationDelivery {
         migrateLegacyPreferenceIfNeeded()
-        return CompletionNotificationStyle(
+        return NotificationDelivery(
             rawValue: UserDefaults.standard.string(forKey: preferenceKey) ?? ""
         ) ?? .inApp
     }
 
+    private static var startInApp: Bool { boolPreference(forKey: startInAppPreferenceKey) }
+    private static var startSystem: Bool { boolPreference(forKey: startSystemPreferenceKey) }
+    private static var completionInApp: Bool { boolPreference(forKey: completionInAppPreferenceKey) }
+    private static var completionSystem: Bool { boolPreference(forKey: completionSystemPreferenceKey) }
+    private static var failureInApp: Bool { boolPreference(forKey: failureInAppPreferenceKey) }
+    private static var failureSystem: Bool { boolPreference(forKey: failureSystemPreferenceKey) }
+
     static func requestPermission() {
-        guard completionNotificationStyle.usesSystemNotification else { return }
+        guard startSystem || completionSystem || failureSystem else {
+            return
+        }
         Task {
             let center = UNUserNotificationCenter.current()
             let settings = await center.notificationSettings()
@@ -162,9 +235,24 @@ enum DownloadNotifications {
         }
     }
 
-    static func postCompletion(request: DownloadRequest, output: URL) {
+    static var showsInAppFailure: Bool { failureInApp }
+
+    static func postStarted(request: DownloadRequest) {
+        guard startSystem else { return }
         postSystemNotification(
-            title: "Download complete",
+            title: "Download started",
+            body: startMessage(for: request)
+        )
+    }
+
+    static func startMessage(for request: DownloadRequest) -> String {
+        "Downloading \(request.stream.name) for \(formattedDuration(request.duration))."
+    }
+
+    static func postCompletion(request: DownloadRequest, output: URL) {
+        guard completionSystem else { return }
+        postSystemNotification(
+            title: "Download complete!",
             body: completionMessage(for: request),
             userInfo: ["completedOutputPath": output.path],
             categoryIdentifier: DownloadNotificationAction.completionCategoryIdentifier
@@ -176,9 +264,18 @@ enum DownloadNotifications {
     }
 
     static func postIncomplete(failedSegmentCount: Int, totalSegmentCount: Int) {
+        guard failureSystem else { return }
         postSystemNotification(
             title: "Download incomplete",
-            body: "\(failedSegmentCount) of \(totalSegmentCount) segments could not be downloaded."
+            body: "Failed to download \(failedSegmentCount) of \(totalSegmentCount) segments."
+        )
+    }
+
+    static func postFailure(request: DownloadRequest, message: String) {
+        guard failureSystem else { return }
+        postSystemNotification(
+            title: "Download failed",
+            body: "\(request.stream.name): \(message)"
         )
     }
 
@@ -200,7 +297,6 @@ enum DownloadNotifications {
         userInfo: [String: String] = [:],
         categoryIdentifier: String? = nil
     ) {
-        guard completionNotificationStyle.usesSystemNotification else { return }
         Task {
             let center = UNUserNotificationCenter.current()
             let settings = await center.notificationSettings()
@@ -215,6 +311,41 @@ enum DownloadNotifications {
             let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
             try? await center.add(request)
         }
+    }
+
+    private static func migrateChannelPreferences(
+        inAppKey: String,
+        systemKey: String,
+        eventDeliveryKey: String,
+        legacyKey: String,
+        defaultDelivery: NotificationEventDelivery
+    ) {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: inAppKey) == nil || defaults.object(forKey: systemKey) == nil else {
+            return
+        }
+
+        let eventDelivery: NotificationEventDelivery
+        if let value = defaults.string(forKey: eventDeliveryKey),
+           let parsedValue = NotificationEventDelivery(rawValue: value) {
+            eventDelivery = parsedValue
+        } else if defaults.object(forKey: legacyKey) != nil {
+            eventDelivery = defaults.bool(forKey: legacyKey) ? .useDefault : .none
+        } else {
+            eventDelivery = defaultDelivery
+        }
+
+        let defaultDelivery = NotificationDelivery(
+            rawValue: defaults.string(forKey: preferenceKey) ?? ""
+        ) ?? .inApp
+        let resolvedDelivery = eventDelivery.resolved(using: defaultDelivery)
+        defaults.set(resolvedDelivery.usesInAppPopup, forKey: inAppKey)
+        defaults.set(resolvedDelivery.usesSystemNotification, forKey: systemKey)
+    }
+
+    private static func boolPreference(forKey key: String) -> Bool {
+        migrateLegacyPreferenceIfNeeded()
+        return UserDefaults.standard.bool(forKey: key)
     }
 }
 
@@ -231,9 +362,27 @@ final class DownloadController: ObservableObject {
     @Published var completedRequest: DownloadRequest?
     @Published var errorMessage: String?
     @Published var incompleteDownload: IncompleteDownload?
+    @Published private(set) var currentRequest: DownloadRequest?
+    @Published private(set) var lastQueuedDownloadStarted: DownloadRequest?
+    @Published private(set) var queuedDownloadStartID: UUID?
+    @Published private(set) var lastDownloadStarted: DownloadRequest?
+    @Published private(set) var downloadStartID: UUID?
+    @Published private(set) var lastDownloadStartedFromQueue = false
+    @Published private(set) var queue: [QueuedDownload]
+    @Published private(set) var isQueuePaused: Bool
     private var activeTask: Task<Void, Never>?
     private var activeOperationID: UUID?
     private var activeIncompleteDownload: IncompleteDownload?
+    private let queueDefaultsKey = "BBCD4Mac.downloadQueue"
+    private let queuePauseDefaultsKey = "BBCD4Mac.downloadQueuePaused"
+
+    init() {
+        queue = Self.loadQueue()
+        isQueuePaused = UserDefaults.standard.bool(forKey: queuePauseDefaultsKey)
+        DispatchQueue.main.async { [weak self] in
+            self?.startNextDownloadIfPossible()
+        }
+    }
 
     private func updateDockProgress() {
         if isDownloading {
@@ -243,13 +392,56 @@ final class DownloadController: ObservableObject {
         }
     }
 
-    func start(_ request: DownloadRequest) {
+    func submit(_ request: DownloadRequest) {
+        if isDownloading || incompleteDownload != nil {
+            enqueue(request)
+        } else {
+            start(request)
+        }
+    }
+
+    func enqueue(_ request: DownloadRequest) {
+        queue.append(QueuedDownload(request: request))
+        saveQueue()
+        startNextDownloadIfPossible()
+    }
+
+    func removeQueuedDownload(_ item: QueuedDownload) {
+        queue.removeAll { $0.id == item.id }
+        saveQueue()
+    }
+
+    func moveQueuedDownloads(fromOffsets source: IndexSet, toOffset destination: Int) {
+        queue.move(fromOffsets: source, toOffset: destination)
+        saveQueue()
+    }
+
+    func clearQueue() {
+        queue.removeAll()
+        saveQueue()
+    }
+
+    func toggleQueuePaused() {
+        isQueuePaused.toggle()
+        UserDefaults.standard.set(isQueuePaused, forKey: queuePauseDefaultsKey)
+
+        if !isQueuePaused {
+            startNextDownloadIfPossible()
+        }
+    }
+
+    private func start(_ request: DownloadRequest, fromQueue: Bool = false) {
         guard !isDownloading else { return }
         completedOutput = nil
         completedRequest = nil
+        currentRequest = request
+        lastDownloadStarted = request
+        lastDownloadStartedFromQueue = fromQueue
+        downloadStartID = UUID()
         isDownloading = true
         progress = 0
         status = "Preparing download…"
+        DownloadNotifications.postStarted(request: request)
         let operationID = beginOperation()
 
         activeTask = Task { [weak self] in
@@ -267,19 +459,19 @@ final class DownloadController: ObservableObject {
                 finishOperation(operationID)
             } catch DownloadError.incomplete(let incomplete) {
                 guard self.isCurrent(operationID) else { return }
-                incompleteDownload = incomplete
                 status = "Download incomplete"
                 DownloadNotifications.postIncomplete(
                     failedSegmentCount: incomplete.failedSegments.count,
                     totalSegmentCount: incomplete.segments.count
                 )
-                finishOperation(operationID)
+                resolveIncompleteDownload(incomplete, operationID: operationID)
             } catch is CancellationError {
                 finishCancelled(operationID)
             } catch {
                 guard self.isCurrent(operationID) else { return }
                 errorMessage = error.localizedDescription
                 status = "Error"
+                DownloadNotifications.postFailure(request: request, message: error.localizedDescription)
                 finishOperation(operationID)
             }
         }
@@ -288,6 +480,7 @@ final class DownloadController: ObservableObject {
     func savePartialDownload() {
         guard let incomplete = incompleteDownload, !isDownloading else { return }
         incompleteDownload = nil
+        currentRequest = incomplete.request
         isDownloading = true
         status = "Saving downloaded segments…"
         activeIncompleteDownload = incomplete
@@ -309,10 +502,18 @@ final class DownloadController: ObservableObject {
                 finishCancelled(operationID)
             } catch {
                 guard self.isCurrent(operationID) else { return }
-                incompleteDownload = incomplete
                 errorMessage = error.localizedDescription
                 status = "Error"
-                finishOperation(operationID)
+                DownloadNotifications.postFailure(request: incomplete.request, message: error.localizedDescription)
+                if DownloadNotifications.showsInAppFailure {
+                    incompleteDownload = incomplete
+                    finishOperation(operationID)
+                } else {
+                    DownloadEngine.discard(incomplete)
+                    incompleteDownload = nil
+                    errorMessage = nil
+                    finishOperation(operationID)
+                }
             }
         }
     }
@@ -320,6 +521,7 @@ final class DownloadController: ObservableObject {
     func retryIncompleteDownload() {
         guard let incomplete = incompleteDownload, !isDownloading else { return }
         incompleteDownload = nil
+        currentRequest = incomplete.request
         isDownloading = true
         status = "Retrying from the failed segment…"
         activeIncompleteDownload = incomplete
@@ -339,19 +541,19 @@ final class DownloadController: ObservableObject {
                 finishOperation(operationID)
             } catch DownloadError.incomplete(let nextIncomplete) {
                 guard self.isCurrent(operationID) else { return }
-                incompleteDownload = nextIncomplete
                 status = "Download incomplete"
                 DownloadNotifications.postIncomplete(
                     failedSegmentCount: nextIncomplete.failedSegments.count,
                     totalSegmentCount: nextIncomplete.segments.count
                 )
-                finishOperation(operationID)
+                resolveIncompleteDownload(nextIncomplete, operationID: operationID)
             } catch is CancellationError {
                 finishCancelled(operationID)
             } catch {
                 guard self.isCurrent(operationID) else { return }
                 errorMessage = error.localizedDescription
                 status = "Error"
+                DownloadNotifications.postFailure(request: incomplete.request, message: error.localizedDescription)
                 finishOperation(operationID)
             }
         }
@@ -367,11 +569,13 @@ final class DownloadController: ObservableObject {
         activeOperationID = nil
         activeIncompleteDownload = nil
         incompleteDownload = nil
+        currentRequest = nil
         completedOutput = nil
         errorMessage = nil
         progress = 0
         isDownloading = false
         status = "Cancelled"
+        startNextDownloadIfPossible()
     }
 
     func discardIncompleteDownload() {
@@ -379,12 +583,43 @@ final class DownloadController: ObservableObject {
         DownloadEngine.discard(incomplete)
         incompleteDownload = nil
         status = "Ready"
+        startNextDownloadIfPossible()
+    }
+
+    func resolveIncompleteDownloadWithoutPrompt() {
+        guard let incomplete = incompleteDownload, !isDownloading else { return }
+        if DownloadEngine.hasSaveablePartial(incomplete) {
+            savePartialDownload()
+        } else {
+            discardIncompleteDownload()
+        }
     }
 
     private func apply(_ update: DownloadUpdate) {
         guard isDownloading else { return }
         status = update.status
         progress = update.progress
+    }
+
+    private func resolveIncompleteDownload(_ incomplete: IncompleteDownload, operationID: UUID) {
+        if DownloadNotifications.showsInAppFailure {
+            incompleteDownload = incomplete
+            finishOperation(operationID)
+            return
+        }
+
+        if DownloadEngine.hasSaveablePartial(incomplete) {
+            incompleteDownload = incomplete
+            finishOperation(operationID)
+            DispatchQueue.main.async { [weak self] in
+                self?.savePartialDownload()
+            }
+        } else {
+            DownloadEngine.discard(incomplete)
+            incompleteDownload = nil
+            status = "Download incomplete"
+            finishOperation(operationID)
+        }
     }
 
     private func beginOperation() -> UUID {
@@ -402,7 +637,9 @@ final class DownloadController: ObservableObject {
         activeTask = nil
         activeOperationID = nil
         activeIncompleteDownload = nil
+        currentRequest = nil
         isDownloading = false
+        startNextDownloadIfPossible()
     }
 
     private func finishCancelled(_ operationID: UUID) {
@@ -410,9 +647,32 @@ final class DownloadController: ObservableObject {
         activeTask = nil
         activeOperationID = nil
         activeIncompleteDownload = nil
+        currentRequest = nil
         progress = 0
         status = "Cancelled"
         isDownloading = false
+        startNextDownloadIfPossible()
+    }
+
+    private func startNextDownloadIfPossible() {
+        guard !isQueuePaused, !isDownloading, incompleteDownload == nil, !queue.isEmpty else { return }
+        let next = queue.removeFirst()
+        saveQueue()
+        lastQueuedDownloadStarted = next.request
+        queuedDownloadStartID = UUID()
+        start(next.request, fromQueue: true)
+    }
+
+    private func saveQueue() { Self.save(queue, key: queueDefaultsKey) }
+
+    private static func loadQueue() -> [QueuedDownload] {
+        guard let data = UserDefaults.standard.data(forKey: "BBCD4Mac.downloadQueue") else { return [] }
+        return (try? JSONDecoder().decode([QueuedDownload].self, from: data)) ?? []
+    }
+
+    private static func save<T: Encodable>(_ value: T, key: String) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        UserDefaults.standard.set(data, forKey: key)
     }
 }
 
@@ -676,11 +936,7 @@ enum DownloadEngine {
         _ incomplete: IncompleteDownload,
         update: @escaping @Sendable (DownloadUpdate) async -> Void
     ) async throws -> URL {
-        guard let firstFailedSegment = incomplete.failedSegments.min() else {
-            throw DownloadError.processFailed("There are no failed segments to save around.")
-        }
-        let available = incomplete.segments.filter { $0 < firstFailedSegment }
-            .prefix { segmentIsComplete($0, in: incomplete) }
+        let available = availableSegments(in: incomplete)
         guard !available.isEmpty else {
             throw DownloadError.processFailed("There are no downloaded segments available to save.")
         }
@@ -800,6 +1056,10 @@ enum DownloadEngine {
         try? FileManager.default.removeItem(at: incomplete.workspace)
     }
 
+    static func hasSaveablePartial(_ incomplete: IncompleteDownload) -> Bool {
+        !availableSegments(in: incomplete).isEmpty
+    }
+
     private static func retryFailure(for incomplete: IncompleteDownload, segment: Int) -> DownloadError {
         .incomplete(IncompleteDownload(
             request: incomplete.request,
@@ -814,6 +1074,15 @@ enum DownloadEngine {
     private static func incompleteTail(in segments: [Int], after failures: [Int]) -> [Int] {
         guard let firstFailure = failures.min() else { return [] }
         return segments.filter { $0 >= firstFailure }
+    }
+
+    private static func availableSegments(in incomplete: IncompleteDownload) -> [Int] {
+        guard let firstFailedSegment = incomplete.failedSegments.min() else { return [] }
+        return Array(
+            incomplete.segments
+                .filter { $0 < firstFailedSegment }
+                .prefix { segmentIsComplete($0, in: incomplete) }
+        )
     }
 
     private static func segmentIsComplete(_ segment: Int, in incomplete: IncompleteDownload) -> Bool {

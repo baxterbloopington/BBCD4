@@ -11,6 +11,9 @@ let package = Package(
         .executableTarget(
             name: "BBCD4Mac",
             path: ".",
+            exclude: [
+                "release"
+            ],
             resources: [
                 .copy("Discord-Symbol-Black.svg"),
                 .copy("Discord-Symbol-White.svg"),
