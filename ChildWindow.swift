@@ -86,6 +86,7 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
     @Binding var isPresented: Bool
     let title: String
     let contentSize: NSSize
+    let showsWindowTitle: Bool
     let windowContent: () -> WindowContent
 
     func makeCoordinator() -> Coordinator {
@@ -108,6 +109,7 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
                     defer: false
                 )
                 window.title = title
+                window.titleVisibility = showsWindowTitle ? .visible : .hidden
                 window.contentMinSize = contentSize
                 window.contentMaxSize = contentSize
                 window.standardWindowButton(.zoomButton)?.isHidden = true
@@ -115,9 +117,9 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
                 window.delegate = context.coordinator
 
                 window.contentViewController = NSHostingController(rootView: windowContent())
+                window.appearance = NSApp.appearance
 
                 if let parentWindow = view.window {
-                    parentWindow.addChildWindow(window, ordered: .above)
                     context.coordinator.watch(parentWindow: parentWindow, closing: window)
                     let origin = NSPoint(
                         x: parentWindow.frame.midX - (contentSize.width / 2),
@@ -131,8 +133,6 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
                 context.coordinator.window = window
                 SecondaryWindowRegistry.shared.register(window, title: title)
                 window.makeKeyAndOrderFront(nil)
-            } else {
-                context.coordinator.window?.makeKeyAndOrderFront(nil)
             }
         } else {
             context.coordinator.window?.close()
@@ -143,7 +143,6 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
         var isPresented: Binding<Bool>
         let title: String
         weak var window: NSWindow?
-        weak var parentWindow: NSWindow?
         var parentCloseObserver: NSObjectProtocol?
 
         init(isPresented: Binding<Bool>, title: String) {
@@ -152,7 +151,6 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
         }
 
         func watch(parentWindow: NSWindow, closing childWindow: NSWindow) {
-            self.parentWindow = parentWindow
             parentCloseObserver = NotificationCenter.default.addObserver(
                 forName: NSWindow.willCloseNotification,
                 object: parentWindow,
@@ -165,14 +163,10 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
         }
 
         func windowWillClose(_ notification: Notification) {
-            if let window = notification.object as? NSWindow {
-                parentWindow?.removeChildWindow(window)
-            }
             if let parentCloseObserver {
                 NotificationCenter.default.removeObserver(parentCloseObserver)
                 self.parentCloseObserver = nil
             }
-            parentWindow = nil
             isPresented.wrappedValue = false
             SecondaryWindowRegistry.shared.unregister(title: title)
             window = nil
@@ -185,6 +179,7 @@ extension View {
         isPresented: Binding<Bool>,
         title: String,
         size: NSSize,
+        showsWindowTitle: Bool = false,
         @ViewBuilder content: @escaping () -> WindowContent
     ) -> some View {
         background(
@@ -192,6 +187,7 @@ extension View {
                 isPresented: isPresented,
                 title: title,
                 contentSize: size,
+                showsWindowTitle: showsWindowTitle,
                 windowContent: content
             )
             .frame(width: 0, height: 0)

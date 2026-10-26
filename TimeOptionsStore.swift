@@ -6,21 +6,16 @@ final class TimeOptionsStore: ObservableObject {
     @Published private(set) var options: [String]
 
     private let defaultsKey = "BBCD4Mac.startTimeOptions"
+    private let defaults: UserDefaults
     private static let defaultOptions = (0..<48).map { index in
         String(format: "%02d:%02d:00", index / 2, index.isMultiple(of: 2) ? 0 : 30)
     }
 
     init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         let stored = defaults.stringArray(forKey: defaultsKey) ?? Self.defaultOptions
         options = Self.normalised(stored)
         if options != stored { save() }
-    }
-
-    func add(_ value: String) throws {
-        let time = try Self.validated(value)
-        guard !options.contains(time) else { throw TimeOptionError.duplicate }
-        options.append(time)
-        save()
     }
 
     func add(lines: String) throws {
@@ -73,7 +68,7 @@ final class TimeOptionsStore: ObservableObject {
     }
 
     private func save() {
-        UserDefaults.standard.set(options, forKey: defaultsKey)
+        defaults.set(options, forKey: defaultsKey)
     }
 
     private static func normalised(_ values: [String]) -> [String] {

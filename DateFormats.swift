@@ -33,6 +33,23 @@ enum DateFormats {
         return formatter
     }
 
+    /// Uses the chosen date order while omitting visual separators for filenames.
+    static func filenameDate(_ date: Date, format pattern: String) -> String {
+        formatter(for: pattern)
+            .string(from: date)
+            .unicodeScalars
+            .filter { CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined()
+    }
+
+    static func displayDateTime(_ date: Date, format pattern: String) -> String {
+        let timeFormatter = DateFormatter()
+        timeFormatter.locale = Locale(identifier: "en_GB")
+        timeFormatter.dateFormat = "HH:mm:ss"
+        return "\(formatter(for: pattern).string(from: date)) at \(timeFormatter.string(from: date))"
+    }
+
     static func date(from input: String, format pattern: String) -> Date? {
         let formatter = formatter(for: pattern)
         guard let date = formatter.date(from: input), formatter.string(from: date) == input else {

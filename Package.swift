@@ -12,15 +12,14 @@ let package = Package(
             name: "BBCD4Mac",
             path: ".",
             exclude: [
-                "release"
+                "release", "Tests"
             ],
             resources: [
-                .copy("Discord-Symbol-Black.svg"),
-                .copy("Discord-Symbol-White.svg"),
                 .copy("bbcd4_icon.icns"),
                 .copy("bbcd4_icon.png"),
                 .copy("default-streams.json")
             ]
         ),
+        .testTarget(name: "BBCD4MacTests", dependencies: ["BBCD4Mac"], path: "Tests"),
     ]
 )

@@ -17,6 +17,31 @@ enum AppResources {
     }
 }
 
+enum AppAppearance: String, CaseIterable, Hashable {
+    case system, light, dark
+
+    var title: String {
+        switch self {
+        case .system: "System"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+
+    @MainActor func apply() {
+        let appearance: NSAppearance?
+        switch self {
+        case .system: appearance = nil
+        case .light: appearance = NSAppearance(named: .aqua)
+        case .dark: appearance = NSAppearance(named: .darkAqua)
+        }
+        NSApp.appearance = appearance
+        for window in NSApp.windows {
+            window.appearance = appearance
+        }
+    }
+}
+
 @main
 struct BBCD4Mac {
     static func main() {
@@ -99,25 +124,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             suspensionBehavior: .deliverImmediately
         )
 
+        UpdateCheckFrequency.migratePreferences()
+        DownloadNotifications.migrateLegacyPreferenceIfNeeded()
+        (AppAppearance(rawValue: UserDefaults.standard.string(forKey: "appearanceMode") ?? "") ?? .system).apply()
         installMainMenu()
         let rootView = ContentView(downloadController: downloadController)
             .environmentObject(streamStore)
         let controller = NSHostingController(rootView: rootView)
-        let window = NSWindow(contentViewController: controller)
+        let contentSize = NSSize(width: ControlMetrics.mainWindowWidth, height: 520)
+        let window = MainInputWindow(
+            contentRect: NSRect(origin: .zero, size: contentSize),
+            styleMask: [.titled, .closable, .miniaturizable],
+            backing: .buffered,
+            defer: false
+        )
         window.title = "BBCD4"
-        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.titleVisibility = .hidden
         window.collectionBehavior = [.managed]
         window.standardWindowButton(.zoomButton)?.isHidden = true
-        window.setContentSize(NSSize(width: 520, height: 520))
-        window.minSize = NSSize(width: 520, height: 520)
-        window.maxSize = NSSize(width: 520, height: 520)
+        window.contentMinSize = contentSize
+        window.contentMaxSize = contentSize
+        window.contentViewController = controller
+        window.appearance = NSApp.appearance
+        window.setContentSize(contentSize)
         window.delegate = self
         window.center()
-        window.initialFirstResponder = nil
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        controller.view.layoutSubtreeIfNeeded()
+        window.initialFirstResponder = controller.view
+        window.makeFirstResponder(controller.view)
         self.window = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func activateExistingApp() {
@@ -288,5 +325,29 @@ private final class DockDownloadProgressView: NSView {
 
         NSColor.systemBlue.setFill()
         NSBezierPath(roundedRect: completed, xRadius: height / 2, yRadius: height / 2).fill()
+    }
+}
+
+/// Clear editing only when the click is outside a text input. Field-to-field
+/// clicks stay under AppKit's normal responder handling.
+@MainActor
+private final class MainInputWindow: NSWindow {
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown, let contentView {
+            let point = contentView.convert(event.locationInWindow, from: nil)
+            var hit = contentView.hitTest(point)
+            var clickedTextInput = false
+            while let view = hit {
+                if view is NSTextField || view is NSTextView {
+                    clickedTextInput = true
+                    break
+                }
+                hit = view.superview
+            }
+            let editingField = (firstResponder as? NSTextView)?.delegate as? FocusTrackingTextField
+            let clickedEditingAccessory = editingField?.containsEditingAccessory(at: event.locationInWindow) == true
+            if !clickedTextInput && !clickedEditingAccessory { makeFirstResponder(nil) }
+        }
+        super.sendEvent(event)
     }
 }

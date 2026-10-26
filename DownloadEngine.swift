@@ -1,18 +1,96 @@
+import AppKit
 import Foundation
+import UniformTypeIdentifiers
 import UserNotifications
+
+enum EncodingMethod: String, Codable, CaseIterable, Sendable {
+    case software, hardware
+    var title: String {
+        self == .software ? "Software (Slower, smaller file size)" : "Hardware (Faster, larger file size)"
+    }
+}
+
+enum EncodingQuality: String, Codable, CaseIterable, Sendable {
+    case high, standard
+    var title: String { rawValue.capitalized }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let storedValue = try container.decode(String.self)
+        if storedValue == "best" {
+            self = .high
+        } else if let quality = Self(rawValue: storedValue) {
+            self = quality
+        } else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unknown encoding quality")
+        }
+    }
+    var softwareCRF: String {
+        switch self {
+        case .high: "16"
+        case .standard: "28"
+        }
+    }
+    var hardwareQuality: String {
+        switch self {
+        case .high: "80"
+        case .standard: "65"
+        }
+    }
+}
+
+struct EncodingConfiguration: Codable, Equatable, Sendable {
+    static let preferenceKey = "encodingConfigurationV1"
+    static let defaultEnabled = true
+    static let defaults = EncodingConfiguration()
+    var method: EncodingMethod = .hardware
+    var quality: EncodingQuality = .high
+
+    init(method: EncodingMethod = .hardware, quality: EncodingQuality = .high) {
+        self.method = method
+        self.quality = quality
+    }
+
+    private enum CodingKeys: String, CodingKey { case method, quality }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        method = (try? values.decode(EncodingMethod.self, forKey: .method)) ?? .hardware
+        quality = (try? values.decode(EncodingQuality.self, forKey: .quality)) ?? .high
+    }
+
+    static func load() -> EncodingConfiguration {
+        guard let data = UserDefaults.standard.data(forKey: preferenceKey),
+              let value = try? JSONDecoder().decode(Self.self, from: data) else { return .defaults }
+        return value
+    }
+
+    func videoArguments() -> [String] {
+        switch method {
+        case .software:
+            return ["-c:v", "libx265", "-tag:v", "hvc1", "-crf", quality.softwareCRF,
+                    "-preset", "ultrafast", "-c:a", "copy"]
+        case .hardware:
+            return ["-c:v", "hevc_videotoolbox", "-allow_sw", "0",
+                    "-q:v", quality.hardwareQuality, "-tag:v", "hvc1", "-c:a", "copy"]
+        }
+    }
+}
 
 enum DownloadFilenameFormat: String, CaseIterable, Sendable, Hashable, Codable {
     case firstSegment, startDateTime, startTime
-    case currentDateTime, streamNameRandom, random
+    case currentDateTime, streamNameRandom, random, askEachTime
+    static let defaultFormat = Self.streamNameRandom
 
     var title: String {
         switch self {
-        case .firstSegment: "Stream name – first segment"
-        case .startDateTime: "Stream name – start date – start time"
-        case .startTime: "Stream name – start time"
-        case .currentDateTime: "Stream name – current date – current time"
-        case .streamNameRandom: "Stream name – random 10-character string"
+        case .firstSegment: "Stream name - first segment"
+        case .startDateTime: "Stream name - start date - start time"
+        case .startTime: "Stream name - start time"
+        case .currentDateTime: "Stream name - current date - current time"
+        case .streamNameRandom: "Stream name - random 10-character string"
         case .random: "Random 10-character string"
+        case .askEachTime: "Ask each time"
         }
     }
 }
@@ -27,6 +105,36 @@ struct DownloadRequest: Sendable, Codable {
     let retryDelay: Double
     let maximumConcurrentSegments: Int
     let filenameFormat: DownloadFilenameFormat
+    // Optional for compatibility with queues saved before encoding settings existed.
+    var encodingConfiguration: EncodingConfiguration? = nil
+}
+
+extension DownloadRequest {
+    private enum CodingKeys: String, CodingKey {
+        case stream, start, duration, outputFolder, encodeH265, retryAttempts, retryDelay
+        case maximumConcurrentSegments, filenameFormat, encodingConfiguration
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        stream = try values.decode(Stream.self, forKey: .stream)
+        start = try values.decode(Date.self, forKey: .start)
+        duration = try values.decode(Int.self, forKey: .duration)
+        outputFolder = try values.decode(URL.self, forKey: .outputFolder)
+        guard (1...DownloadLimits.maximumDuration).contains(duration), start.timeIntervalSince1970.isFinite,
+              outputFolder.isFileURL else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid saved download range or folder"))
+        }
+        encodeH265 = (try? values.decode(Bool.self, forKey: .encodeH265)) ?? false
+        retryAttempts = min(10, max(1, (try? values.decode(Int.self, forKey: .retryAttempts)) ?? 3))
+        retryDelay = DownloadLimits.retryDelay((try? values.decode(Double.self, forKey: .retryDelay)) ?? 2)
+        maximumConcurrentSegments = min(50, max(1, (try? values.decode(Int.self, forKey: .maximumConcurrentSegments)) ?? 5))
+        filenameFormat = (try? values.decode(DownloadFilenameFormat.self, forKey: .filenameFormat)) ?? .firstSegment
+        encodingConfiguration = try? values.decode(EncodingConfiguration.self, forKey: .encodingConfiguration)
+        if encodingConfiguration == nil, encodeH265 {
+            encodingConfiguration = EncodingConfiguration(method: .software, quality: .standard)
+        }
+    }
 }
 
 struct QueuedDownload: Identifiable, Codable, Sendable {
@@ -36,6 +144,16 @@ struct QueuedDownload: Identifiable, Codable, Sendable {
     init(id: UUID = UUID(), request: DownloadRequest) {
         self.id = id
         self.request = request
+    }
+}
+
+extension QueuedDownload {
+    private enum CodingKeys: String, CodingKey { case id, request }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? values.decode(UUID.self, forKey: .id)) ?? UUID()
+        request = try values.decode(DownloadRequest.self, forKey: .request)
     }
 }
 
@@ -173,8 +291,7 @@ enum DownloadNotifications {
     private static let failureInAppPreferenceKey = "downloadFailureInAppNotification"
     private static let failureSystemPreferenceKey = "downloadFailureSystemNotification"
 
-    static func migrateLegacyPreferenceIfNeeded() {
-        let defaults = UserDefaults.standard
+    static func migrateLegacyPreferenceIfNeeded(in defaults: UserDefaults = .standard) {
         if defaults.object(forKey: preferenceKey) == nil {
             if let previousValue = defaults.string(forKey: previousPreferenceKey),
                NotificationDelivery(rawValue: previousValue) != nil {
@@ -187,6 +304,7 @@ enum DownloadNotifications {
         }
 
         migrateChannelPreferences(
+            in: defaults,
             inAppKey: startInAppPreferenceKey,
             systemKey: startSystemPreferenceKey,
             eventDeliveryKey: startPreferenceKey,
@@ -194,6 +312,7 @@ enum DownloadNotifications {
             defaultDelivery: .inApp
         )
         migrateChannelPreferences(
+            in: defaults,
             inAppKey: completionInAppPreferenceKey,
             systemKey: completionSystemPreferenceKey,
             eventDeliveryKey: completionPreferenceKey,
@@ -201,6 +320,7 @@ enum DownloadNotifications {
             defaultDelivery: .useDefault
         )
         migrateChannelPreferences(
+            in: defaults,
             inAppKey: failureInAppPreferenceKey,
             systemKey: failureSystemPreferenceKey,
             eventDeliveryKey: failurePreferenceKey,
@@ -209,22 +329,17 @@ enum DownloadNotifications {
         )
     }
 
-    private static var notificationDelivery: NotificationDelivery {
-        migrateLegacyPreferenceIfNeeded()
-        return NotificationDelivery(
-            rawValue: UserDefaults.standard.string(forKey: preferenceKey) ?? ""
-        ) ?? .inApp
-    }
-
-    private static var startInApp: Bool { boolPreference(forKey: startInAppPreferenceKey) }
     private static var startSystem: Bool { boolPreference(forKey: startSystemPreferenceKey) }
-    private static var completionInApp: Bool { boolPreference(forKey: completionInAppPreferenceKey) }
     private static var completionSystem: Bool { boolPreference(forKey: completionSystemPreferenceKey) }
     private static var failureInApp: Bool { boolPreference(forKey: failureInAppPreferenceKey) }
     private static var failureSystem: Bool { boolPreference(forKey: failureSystemPreferenceKey) }
+    private static var streamCheckSystem: Bool {
+        (UserDefaults.standard.object(forKey: StreamAvailabilityPreferences.enabledKey) as? Bool ?? StreamAvailabilityPreferences.defaultEnabled)
+            && UserDefaults.standard.bool(forKey: StreamAvailabilityPreferences.startSystemKey)
+    }
 
     static func requestPermission() {
-        guard startSystem || completionSystem || failureSystem else {
+        guard startSystem || completionSystem || failureSystem || streamCheckSystem else {
             return
         }
         Task {
@@ -246,7 +361,16 @@ enum DownloadNotifications {
     }
 
     static func startMessage(for request: DownloadRequest) -> String {
-        "Downloading \(request.stream.name) for \(formattedDuration(request.duration))."
+        "Downloading \(request.stream.name) from \(formattedDateTime(request.start)) for \(formattedDuration(request.duration))."
+    }
+
+    static func inAppStartMessage(for request: DownloadRequest) -> String {
+        "Downloading \(request.stream.name) for \(formattedDuration(request.duration))"
+    }
+
+    static func postStreamStatusCheckStarted(_ event: StreamStatusCheckStarted) {
+        guard streamCheckSystem else { return }
+        postSystemNotification(title: "Stream status check started", body: event.message)
     }
 
     static func postCompletion(request: DownloadRequest, output: URL) {
@@ -260,7 +384,7 @@ enum DownloadNotifications {
     }
 
     static func completionMessage(for request: DownloadRequest) -> String {
-        "Successfully downloaded \(request.stream.name) for \(formattedDuration(request.duration)) on \(request.start.formatted(date: .abbreviated, time: .omitted))."
+        "Successfully downloaded \(request.stream.name) for \(formattedDuration(request.duration)) on \(formattedDateTime(request.start))."
     }
 
     static func postIncomplete(failedSegmentCount: Int, totalSegmentCount: Int) {
@@ -275,7 +399,14 @@ enum DownloadNotifications {
         guard failureSystem else { return }
         postSystemNotification(
             title: "Download failed",
-            body: "\(request.stream.name): \(message)"
+            body: "\(request.stream.name) (\(formattedDateTime(request.start))): \(message)"
+        )
+    }
+
+    private static func formattedDateTime(_ date: Date) -> String {
+        DateFormats.displayDateTime(
+            date,
+            format: UserDefaults.standard.string(forKey: "dateFormat") ?? "dd/MM/yyyy"
         )
     }
 
@@ -314,13 +445,13 @@ enum DownloadNotifications {
     }
 
     private static func migrateChannelPreferences(
+        in defaults: UserDefaults,
         inAppKey: String,
         systemKey: String,
         eventDeliveryKey: String,
         legacyKey: String,
         defaultDelivery: NotificationEventDelivery
     ) {
-        let defaults = UserDefaults.standard
         guard defaults.object(forKey: inAppKey) == nil || defaults.object(forKey: systemKey) == nil else {
             return
         }
@@ -339,8 +470,12 @@ enum DownloadNotifications {
             rawValue: defaults.string(forKey: preferenceKey) ?? ""
         ) ?? .inApp
         let resolvedDelivery = eventDelivery.resolved(using: defaultDelivery)
-        defaults.set(resolvedDelivery.usesInAppPopup, forKey: inAppKey)
-        defaults.set(resolvedDelivery.usesSystemNotification, forKey: systemKey)
+        if defaults.object(forKey: inAppKey) == nil {
+            defaults.set(resolvedDelivery.usesInAppPopup, forKey: inAppKey)
+        }
+        if defaults.object(forKey: systemKey) == nil {
+            defaults.set(resolvedDelivery.usesSystemNotification, forKey: systemKey)
+        }
     }
 
     private static func boolPreference(forKey key: String) -> Bool {
@@ -363,24 +498,31 @@ final class DownloadController: ObservableObject {
     @Published var errorMessage: String?
     @Published var incompleteDownload: IncompleteDownload?
     @Published private(set) var currentRequest: DownloadRequest?
-    @Published private(set) var lastQueuedDownloadStarted: DownloadRequest?
-    @Published private(set) var queuedDownloadStartID: UUID?
     @Published private(set) var lastDownloadStarted: DownloadRequest?
     @Published private(set) var downloadStartID: UUID?
     @Published private(set) var lastDownloadStartedFromQueue = false
     @Published private(set) var queue: [QueuedDownload]
     @Published private(set) var isQueuePaused: Bool
+    private var completionSequencePosition = 0
     private var activeTask: Task<Void, Never>?
     private var activeOperationID: UUID?
     private var activeIncompleteDownload: IncompleteDownload?
     private let queueDefaultsKey = "BBCD4Mac.downloadQueue"
     private let queuePauseDefaultsKey = "BBCD4Mac.downloadQueuePaused"
 
-    init() {
-        queue = Self.loadQueue()
-        isQueuePaused = UserDefaults.standard.bool(forKey: queuePauseDefaultsKey)
-        DispatchQueue.main.async { [weak self] in
-            self?.startNextDownloadIfPossible()
+    private let defaults: UserDefaults
+    private var queueRecoveryData: Data?
+
+    init(defaults: UserDefaults = .standard, automaticallyStartsQueue: Bool = true) {
+        self.defaults = defaults
+        let loaded = Self.loadQueue(in: defaults)
+        queue = loaded.items
+        queueRecoveryData = loaded.recovery
+        isQueuePaused = defaults.bool(forKey: queuePauseDefaultsKey)
+        if automaticallyStartsQueue {
+            DispatchQueue.main.async { [weak self] in
+                self?.startNextDownloadIfPossible()
+            }
         }
     }
 
@@ -423,7 +565,7 @@ final class DownloadController: ObservableObject {
 
     func toggleQueuePaused() {
         isQueuePaused.toggle()
-        UserDefaults.standard.set(isQueuePaused, forKey: queuePauseDefaultsKey)
+        defaults.set(isQueuePaused, forKey: queuePauseDefaultsKey)
 
         if !isQueuePaused {
             startNextDownloadIfPossible()
@@ -432,6 +574,10 @@ final class DownloadController: ObservableObject {
 
     private func start(_ request: DownloadRequest, fromQueue: Bool = false) {
         guard !isDownloading else { return }
+        if !playbackBatchActive {
+            completionSequencePosition = 0
+            playbackBatchActive = true
+        }
         completedOutput = nil
         completedRequest = nil
         currentRequest = request
@@ -448,14 +594,14 @@ final class DownloadController: ObservableObject {
             guard let self else { return }
             do {
                 let output = try await DownloadEngine.run(request) { update in
-                    await self.apply(update)
+                    await self.apply(update, operationID: operationID)
                 }
                 guard self.isCurrent(operationID) else { return }
-                completedRequest = request
-                completedOutput = output
+                let namedOutput = try chooseCompletedFilename(for: request, output: output)
+                recordCompletion(request: request, output: namedOutput)
                 progress = 1
                 status = "Done!"
-                DownloadNotifications.postCompletion(request: request, output: output)
+                DownloadNotifications.postCompletion(request: request, output: namedOutput)
                 finishOperation(operationID)
             } catch DownloadError.incomplete(let incomplete) {
                 guard self.isCurrent(operationID) else { return }
@@ -489,14 +635,14 @@ final class DownloadController: ObservableObject {
             guard let self else { return }
             do {
                 let output = try await DownloadEngine.savePartial(incomplete) { update in
-                    await self.apply(update)
+                    await self.apply(update, operationID: operationID)
                 }
                 guard self.isCurrent(operationID) else { return }
-                completedRequest = incomplete.request
-                completedOutput = output
+                let namedOutput = try chooseCompletedFilename(for: incomplete.request, output: output)
+                recordCompletion(request: incomplete.request, output: namedOutput)
                 progress = 1
                 status = "Done!"
-                DownloadNotifications.postCompletion(request: incomplete.request, output: output)
+                DownloadNotifications.postCompletion(request: incomplete.request, output: namedOutput)
                 finishOperation(operationID)
             } catch is CancellationError {
                 finishCancelled(operationID)
@@ -530,14 +676,14 @@ final class DownloadController: ObservableObject {
             guard let self else { return }
             do {
                 let output = try await DownloadEngine.retry(incomplete) { update in
-                    await self.apply(update)
+                    await self.apply(update, operationID: operationID)
                 }
                 guard self.isCurrent(operationID) else { return }
-                completedRequest = incomplete.request
-                completedOutput = output
+                let namedOutput = try chooseCompletedFilename(for: incomplete.request, output: output)
+                recordCompletion(request: incomplete.request, output: namedOutput)
                 progress = 1
                 status = "Done!"
-                DownloadNotifications.postCompletion(request: incomplete.request, output: output)
+                DownloadNotifications.postCompletion(request: incomplete.request, output: namedOutput)
                 finishOperation(operationID)
             } catch DownloadError.incomplete(let nextIncomplete) {
                 guard self.isCurrent(operationID) else { return }
@@ -561,9 +707,13 @@ final class DownloadController: ObservableObject {
 
     func cancelCurrentDownload() {
         guard isDownloading else { return }
-        activeTask?.cancel()
+        let cancelledTask = activeTask
+        cancelledTask?.cancel()
         if let incomplete = activeIncompleteDownload {
-            DownloadEngine.discard(incomplete)
+            Task {
+                await cancelledTask?.value
+                DownloadEngine.discard(incomplete)
+            }
         }
         activeTask = nil
         activeOperationID = nil
@@ -595,10 +745,49 @@ final class DownloadController: ObservableObject {
         }
     }
 
-    private func apply(_ update: DownloadUpdate) {
-        guard isDownloading else { return }
+    private func apply(_ update: DownloadUpdate, operationID: UUID) {
+        guard isDownloading, isCurrent(operationID) else { return }
         status = update.status
         progress = update.progress
+    }
+
+    /// The completed download is kept under its generated name if Save is cancelled.
+    private func chooseCompletedFilename(for request: DownloadRequest, output: URL) throws -> URL {
+        guard request.filenameFormat == .askEachTime else { return output }
+        let panel = NSSavePanel()
+        panel.title = "Name downloaded media"
+        panel.prompt = "Save"
+        panel.directoryURL = output.deletingLastPathComponent()
+        panel.nameFieldStringValue = output.lastPathComponent
+        if let type = UTType(filenameExtension: output.pathExtension) {
+            panel.allowedContentTypes = [type]
+        }
+        panel.canCreateDirectories = true
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let destination = panel.url,
+              destination.standardizedFileURL != output.standardizedFileURL else { return output }
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: output)
+        } else {
+            try FileManager.default.moveItem(at: output, to: destination)
+        }
+        return destination
+    }
+
+    private var playbackBatchActive = false
+
+    private func recordCompletion(request: DownloadRequest, output: URL) {
+        completionSequencePosition += 1
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: "revealFinishedVideo") {
+            let mode = defaults.string(forKey: "completionPlaybackMode") ?? "each"
+            let shouldPlay = mode == "each"
+                || (mode == "first" && completionSequencePosition == 1)
+                || (mode == "last" && queue.isEmpty)
+            if shouldPlay { NSWorkspace.shared.open(output) }
+        }
+        completedRequest = request
+        completedOutput = output
     }
 
     private func resolveIncompleteDownload(_ incomplete: IncompleteDownload, operationID: UUID) {
@@ -655,24 +844,35 @@ final class DownloadController: ObservableObject {
     }
 
     private func startNextDownloadIfPossible() {
+        if !isDownloading && incompleteDownload == nil && queue.isEmpty {
+            playbackBatchActive = false
+        }
         guard !isQueuePaused, !isDownloading, incompleteDownload == nil, !queue.isEmpty else { return }
         let next = queue.removeFirst()
         saveQueue()
-        lastQueuedDownloadStarted = next.request
-        queuedDownloadStartID = UUID()
         start(next.request, fromQueue: true)
     }
 
-    private func saveQueue() { Self.save(queue, key: queueDefaultsKey) }
-
-    private static func loadQueue() -> [QueuedDownload] {
-        guard let data = UserDefaults.standard.data(forKey: "BBCD4Mac.downloadQueue") else { return [] }
-        return (try? JSONDecoder().decode([QueuedDownload].self, from: data)) ?? []
+    private func saveQueue() {
+        guard let data = try? JSONEncoder().encode(queue) else { return }
+        if let queueRecoveryData {
+            defaults.set(queueRecoveryData, forKey: queueDefaultsKey + ".recovery-" + UUID().uuidString)
+            self.queueRecoveryData = nil
+        }
+        defaults.set(data, forKey: queueDefaultsKey)
     }
 
-    private static func save<T: Encodable>(_ value: T, key: String) {
-        guard let data = try? JSONEncoder().encode(value) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+    private static func loadQueue(in defaults: UserDefaults) -> (items: [QueuedDownload], recovery: Data?) {
+        guard let data = defaults.data(forKey: "BBCD4Mac.downloadQueue") else { return ([], nil) }
+        guard let decoded = try? JSONDecoder().decode(RecoverableArray<QueuedDownload>.self, from: data) else { return ([], data) }
+        var seen = Set<UUID>()
+        var repaired = decoded.skippedCount > 0
+        let items = decoded.values.map { item in
+            if seen.insert(item.id).inserted { return item }
+            repaired = true
+            return QueuedDownload(request: item.request)
+        }
+        return (items, repaired ? data : nil)
     }
 }
 
@@ -680,12 +880,172 @@ enum DownloadEngine {
     private static let segmentDuration = 3.84
     private static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36"
 
+    // Worker groups enforce each request's limit; the connection pool must not
+    // impose a lower per-host ceiling on those transfers.
+    private static let maximumMediaTransfers = 50
+    private static let mediaSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpMaximumConnectionsPerHost = maximumMediaTransfers
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        return URLSession(configuration: configuration)
+    }()
+
+    private static let availabilitySession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpMaximumConnectionsPerHost = StreamAvailabilityPreferences.maximumConcurrentChecks
+        configuration.timeoutIntervalForRequest = 8
+        configuration.timeoutIntervalForResource = 12
+        configuration.waitsForConnectivity = false
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        return URLSession(configuration: configuration)
+    }()
+
+    static func streamIsAvailable(_ urlString: String) async throws -> Bool {
+        guard let url = URL(string: urlString),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return false }
+        if url.path.lowercased().hasSuffix(".m3u8") {
+            return try await checkHLSAvailability(url, depth: 0)
+        }
+        guard url.path.lowercased().hasSuffix(".mpd") else { return false }
+        let (data, finalURL) = try await availabilityManifest(url)
+        let parser = MPDParser(baseURL: finalURL.deletingLastPathComponent())
+        let xml = XMLParser(data: data)
+        xml.delegate = parser
+        guard xml.parse() else { return false }
+        let video = parser.representations.filter { $0.type == .video }.min { $0.bandwidth < $1.bandwidth }
+        let audio = parser.representations.filter { $0.type == .audio }.min { $0.bandwidth < $1.bandwidth }
+        let required = [video, audio].compactMap { $0 }
+        guard !required.isEmpty else { return false }
+        // Leave room for publication delay, but never treat an old manifest
+        // alone as evidence that the stream is still serving live media.
+        for age in [15.0, 30.0, 60.0] {
+            try Task.checkCancellation()
+            let time = Date().addingTimeInterval(-age)
+            var available = true
+            for representation in required {
+                let number: Int
+                if let start = parser.availabilityStartTime,
+                   let duration = representation.segmentDuration, duration > 0 {
+                    guard time >= start else { return false }
+                    let offset = floor(time.timeIntervalSince(start) / duration)
+                    guard offset.isFinite, offset >= 0, representation.startNumber >= 0,
+                          offset < Double(Int.max - representation.startNumber) else { return false }
+                    number = representation.startNumber + Int(offset)
+                } else {
+                    number = segmentStarting(atOrBefore: time)
+                }
+                if try await availabilityMedia(segmentURL(representation.media, number: number)) == false {
+                    available = false
+                    break
+                }
+            }
+            if available { return true }
+        }
+        return false
+    }
+
+    private static func availabilityRequest(_ url: URL) throws -> URLRequest {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            throw DownloadError.invalidStream
+        }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("https://www.bbc.co.uk/", forHTTPHeaderField: "Referer")
+        request.setValue("https://www.bbc.co.uk", forHTTPHeaderField: "Origin")
+        request.networkServiceType = .background
+        return request
+    }
+
+    private static func availabilityManifest(_ url: URL) async throws -> (Data, URL) {
+        let (bytes, response) = try await availabilitySession.bytes(for: availabilityRequest(url))
+        defer { bytes.task.cancel() }
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw DownloadError.invalidStream
+        }
+        let maximumSize = 1_048_576
+        guard response.expectedContentLength <= maximumSize else { throw DownloadError.invalidStream }
+        var data = Data()
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            guard data.count < maximumSize else { throw DownloadError.invalidStream }
+            data.append(byte)
+        }
+        return (data, response.url ?? url)
+    }
+
+    private static func availabilityMedia(_ url: URL) async throws -> Bool {
+        var request = try availabilityRequest(url)
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        let (bytes, response) = try await availabilitySession.bytes(for: request)
+        defer { bytes.task.cancel() }
+        let mimeType = response.mimeType?.lowercased() ?? ""
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              !mimeType.hasPrefix("text/"), !mimeType.contains("json"), !mimeType.contains("xml") else { return false }
+        var iterator = bytes.makeAsyncIterator()
+        guard let firstByte = try await iterator.next() else { return false }
+        return firstByte != 0x3c && firstByte != 0x7b
+    }
+
+    private static func checkHLSAvailability(_ url: URL, depth: Int) async throws -> Bool {
+        guard depth < 4 else { return false }
+        let (data, finalURL) = try await availabilityManifest(url)
+        let lines = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard lines.first == "#EXTM3U", !lines.contains("#EXT-X-ENDLIST") else { return false }
+        let base = finalURL.deletingLastPathComponent()
+        if let variant = lines.firstIndex(where: { $0.hasPrefix("#EXT-X-STREAM-INF:") }) {
+            guard let path = lines.dropFirst(variant + 1).first(where: { !$0.isEmpty && !$0.hasPrefix("#") }),
+                  let child = URL(string: path, relativeTo: base)?.absoluteURL,
+                  try await checkHLSAvailability(child, depth: depth + 1) else { return false }
+            if let group = capture(#"AUDIO=["']([^"']+)["']"#, in: lines[variant]) {
+                let audioLines = lines.filter {
+                    $0.hasPrefix("#EXT-X-MEDIA:") && $0.contains("TYPE=AUDIO")
+                        && capture(#"GROUP-ID=["']([^"']+)["']"#, in: $0) == group
+                }
+                let audio = audioLines.first(where: { $0.contains("DEFAULT=YES") }) ?? audioLines.first
+                if let audio, let path = capture(#"URI=["']([^"']+)["']"#, in: audio),
+                   let child = URL(string: path, relativeTo: base)?.absoluteURL {
+                    return try await checkHLSAvailability(child, depth: depth + 1)
+                }
+            }
+            return true
+        }
+        var latest: URL?
+        var latestStart: Date?
+        var runningStart: Date?
+        var duration = segmentDuration
+        let dateFormatter = ISO8601DateFormatter()
+        let fractionalDateFormatter = ISO8601DateFormatter()
+        fractionalDateFormatter.formatOptions.insert(.withFractionalSeconds)
+        for line in lines {
+            if line.hasPrefix("#EXT-X-PROGRAM-DATE-TIME:") {
+                let value = String(line.dropFirst("#EXT-X-PROGRAM-DATE-TIME:".count))
+                runningStart = dateFormatter.date(from: value) ?? fractionalDateFormatter.date(from: value)
+            } else if line.hasPrefix("#EXTINF:") {
+                duration = Double(line.dropFirst("#EXTINF:".count).split(separator: ",").first ?? "") ?? segmentDuration
+            } else if !line.isEmpty, !line.hasPrefix("#") {
+                latest = URL(string: line, relativeTo: base)?.absoluteURL
+                latestStart = runningStart
+                runningStart = runningStart?.addingTimeInterval(duration)
+            }
+        }
+        guard let latest else { return false }
+        if let latestStart {
+            let age = Date().timeIntervalSince(latestStart.addingTimeInterval(duration))
+            guard age < max(120, duration * 3), age > -60 else { return false }
+        }
+        return try await availabilityMedia(latest)
+    }
+
     static func run(
         _ request: DownloadRequest,
         update: @escaping @Sendable (DownloadUpdate) async -> Void
     ) async throws -> URL {
-        guard request.duration > 0 else { throw DownloadError.invalidDuration }
-        guard let sourceURL = URL(string: request.stream.url) else {
+        guard (1...DownloadLimits.maximumDuration).contains(request.duration) else { throw DownloadError.invalidDuration }
+        guard let sourceURL = URL(string: request.stream.url),
+              ["http", "https"].contains(sourceURL.scheme?.lowercased() ?? "") else {
             throw DownloadError.invalidStream
         }
         let urlText = sourceURL.path.lowercased()
@@ -709,7 +1069,9 @@ enum DownloadEngine {
             }
         }
 
-        let startSegment = Int(floor(request.start.timeIntervalSince1970 / segmentDuration))
+        // BBC segment numbers are epoch-based. Always select the segment that
+        // begins at or before the requested time, never the next segment.
+        let startSegment = segmentStarting(atOrBefore: request.start)
         let endSegment = Int(ceil((request.start.timeIntervalSince1970 + Double(request.duration)) / segmentDuration)) - 1
         let segments = Array(startSegment...endSegment)
         let workspace = FileManager.default.temporaryDirectory
@@ -727,7 +1089,7 @@ enum DownloadEngine {
 
         if urlText.hasSuffix(".mpd") {
             await update(.init(status: "Checking stream…", progress: 0))
-            let manifest = try await parseMPD(URL(string: request.stream.url)!)
+            let manifest = try await parseMPD(sourceURL)
             let video = selectVideo(from: manifest.representations)
             let audio = selectAudio(from: manifest.representations)
 
@@ -785,7 +1147,8 @@ enum DownloadEngine {
                 let mergeArguments = [
                     "-y", "-i", workspace.appendingPathComponent("video.mp4").path,
                     "-i", workspace.appendingPathComponent("audio.mp4").path
-                ] + codecArguments(encodeH265: request.encodeH265) + [output.path]
+                ]
+                    + codecArguments(for: request) + [output.path]
                 if request.encodeH265 {
                     try await runFFmpegWithEncodingProgress(
                         mergeArguments,
@@ -794,7 +1157,7 @@ enum DownloadEngine {
                     )
                 } else {
                     await update(.init(status: "Merging…", progress: 1))
-                    try runFFmpeg(mergeArguments)
+                    try await runFFmpeg(mergeArguments)
                 }
             } else if let audio {
                 guard let segmentDuration = audio.segmentDuration,
@@ -802,11 +1165,9 @@ enum DownloadEngine {
                     throw DownloadError.processFailed("This audio MPD does not provide the timing needed to download a selected range.")
                 }
 
-                let startSegment = audio.startNumber + Int(floor(request.start.timeIntervalSince(availabilityStartTime) / segmentDuration))
-                let endSegment = audio.startNumber + Int(ceil(request.start.addingTimeInterval(Double(request.duration)).timeIntervalSince(availabilityStartTime) / segmentDuration)) - 1
-                let audioSegments = Array(startSegment...endSegment)
-                let segmentStart = availabilityStartTime.addingTimeInterval(Double(startSegment - audio.startNumber) * segmentDuration)
-                let trimOffset = max(0, request.start.timeIntervalSince(segmentStart))
+                let audioSegments = Array(try segmentRange(start: request.start, duration: request.duration,
+                    referenceStart: availabilityStartTime, referenceSegment: audio.startNumber, segmentDuration: segmentDuration))
+                let startSegment = audioSegments[0]
                 output = outputURL(for: request, firstSegment: startSegment, fileExtension: "m4a")
 
                 await update(.init(status: "Preparing download…", progress: 0))
@@ -831,18 +1192,17 @@ enum DownloadEngine {
                     workspace.appendingPathComponent("a_\($0).m4s")
                 }, to: workspace.appendingPathComponent("audio.mp4"))
                 await update(.init(status: "Saving audio…", progress: 1))
-                try runFFmpeg([
-                    "-y", "-ss", String(format: "%.3f", trimOffset),
+                try await runFFmpeg([
+                    "-y",
                     "-i", workspace.appendingPathComponent("audio.mp4").path,
-                    "-t", String(request.duration),
-                    "-map", "0:a:0", "-vn", "-c:a", "copy", output.path
-                ])
+                ]
+                    + ["-map", "0:a:0", "-vn", "-c:a", "copy", output.path])
             } else {
                 throw DownloadError.processFailed("No usable media representations were found.")
             }
         } else if urlText.contains(".fmp4.m3u8") {
             await update(.init(status: "Checking stream…", progress: 0))
-            let playlist = try await parseFMP4Playlist(URL(string: request.stream.url)!)
+            let playlist = try await parseFMP4Playlist(sourceURL)
             try await fetch(playlist.initialization, to: workspace.appendingPathComponent("fmp4.init"), request: request)
             let failures = try await fetchSegments(segments, maximumConcurrent: request.maximumConcurrentSegments, update: update) { segment in
                 try await fetch(segmentURL(playlist.media, number: segment), to: workspace.appendingPathComponent("f_\(segment).m4s"), request: request)
@@ -864,7 +1224,8 @@ enum DownloadEngine {
             }, to: workspace.appendingPathComponent("fmp4.mp4"))
             let mergeArguments = [
                 "-y", "-i", workspace.appendingPathComponent("fmp4.mp4").path
-            ] + codecArguments(encodeH265: request.encodeH265) + [output.path]
+            ]
+                + codecArguments(for: request) + [output.path]
             if request.encodeH265 {
                 try await runFFmpegWithEncodingProgress(
                     mergeArguments,
@@ -873,16 +1234,14 @@ enum DownloadEngine {
                 )
             } else {
                 await update(.init(status: "Merging…", progress: 1))
-                try runFFmpeg(mergeArguments)
+                try await runFFmpeg(mergeArguments)
             }
         } else {
             await update(.init(status: "Checking stream…", progress: 0))
             let playlist = try await parseHLSPlaylist(sourceURL)
-            let startHLSegment = playlist.referenceSegment + Int(floor(request.start.timeIntervalSince(playlist.referenceStart) / playlist.segmentDuration))
-            let endHLSegment = playlist.referenceSegment + Int(ceil(request.start.addingTimeInterval(Double(request.duration)).timeIntervalSince(playlist.referenceStart) / playlist.segmentDuration)) - 1
-            let hlsSegments = Array(startHLSegment...endHLSegment)
-            let segmentStart = playlist.referenceStart.addingTimeInterval(Double(startHLSegment - playlist.referenceSegment) * playlist.segmentDuration)
-            let trimOffset = max(0, request.start.timeIntervalSince(segmentStart))
+            let hlsSegments = Array(try segmentRange(start: request.start, duration: request.duration,
+                referenceStart: playlist.referenceStart, referenceSegment: playlist.referenceSegment, segmentDuration: playlist.segmentDuration))
+            let startHLSegment = hlsSegments[0]
             output = outputURL(
                 for: request,
                 firstSegment: startHLSegment,
@@ -907,15 +1266,16 @@ enum DownloadEngine {
             try listing.write(to: workspace.appendingPathComponent("list.txt"), atomically: true, encoding: .utf8)
             if request.stream.category == .radio {
                 await update(.init(status: "Saving audio…", progress: 1))
-                try runFFmpeg([
-                    "-y", "-f", "concat", "-safe", "0", "-ss", String(format: "%.3f", trimOffset),
+                try await runFFmpeg([
+                    "-y", "-f", "concat", "-safe", "0",
                     "-i", workspace.appendingPathComponent("list.txt").path,
-                    "-t", String(request.duration), "-map", "0:a:0", "-vn", "-c:a", "copy", "-bsf:a", "aac_adtstoasc", output.path
-                ])
+                ]
+                    + ["-map", "0:a:0", "-vn", "-c:a", "copy", "-bsf:a", "aac_adtstoasc", output.path])
             } else {
                 let mergeArguments = [
                     "-y", "-f", "concat", "-safe", "0", "-i", workspace.appendingPathComponent("list.txt").path
-                ] + codecArguments(encodeH265: request.encodeH265) + [output.path]
+                ]
+                    + codecArguments(for: request) + [output.path]
                 if request.encodeH265 {
                     try await runFFmpegWithEncodingProgress(
                         mergeArguments,
@@ -924,7 +1284,7 @@ enum DownloadEngine {
                     )
                 } else {
                     await update(.init(status: "Merging…", progress: 1))
-                    try runFFmpeg(mergeArguments)
+                    try await runFFmpeg(mergeArguments)
                 }
             }
         }
@@ -941,7 +1301,7 @@ enum DownloadEngine {
             throw DownloadError.processFailed("There are no downloaded segments available to save.")
         }
         await update(.init(status: "Saving download…", progress: 1))
-        try finish(
+        try await finish(
             kind: incomplete.kind,
             workspace: incomplete.workspace,
             segments: Array(available),
@@ -956,6 +1316,8 @@ enum DownloadEngine {
         _ incomplete: IncompleteDownload,
         update: @escaping @Sendable (DownloadUpdate) async -> Void
     ) async throws -> URL {
+        guard let sourceURL = URL(string: incomplete.request.stream.url),
+              ["http", "https"].contains(sourceURL.scheme?.lowercased() ?? "") else { throw DownloadError.invalidStream }
         guard let firstFailedSegment = incomplete.failedSegments.min() else {
             throw DownloadError.processFailed("There are no failed segments to retry.")
         }
@@ -964,7 +1326,7 @@ enum DownloadEngine {
 
         switch incomplete.kind {
         case .mpd:
-            let manifest = try await parseMPD(URL(string: incomplete.request.stream.url)!)
+            let manifest = try await parseMPD(sourceURL)
             guard let video = selectVideo(from: manifest.representations), let audio = selectAudio(from: manifest.representations) else {
                 throw DownloadError.processFailed("No usable video and audio representations were found.")
             }
@@ -993,7 +1355,7 @@ enum DownloadEngine {
                 mpdRetrySegments = retrySegments
                 firstAvailableSegment = incomplete.firstAvailableSegment
             }
-            let failures = try await fetchMPDSegmentsInOrder(
+            let failures = try await fetchMPDMediaFiles(
                 mpdRetrySegments,
                 video: video,
                 audio: audio,
@@ -1015,33 +1377,48 @@ enum DownloadEngine {
                 ))
             }
         case .fmp4:
-            let playlist = try await parseFMP4Playlist(URL(string: incomplete.request.stream.url)!)
+            let playlist = try await parseFMP4Playlist(sourceURL)
             if !FileManager.default.fileExists(atPath: incomplete.workspace.appendingPathComponent("fmp4.init").path) {
                 try await fetch(playlist.initialization, to: incomplete.workspace.appendingPathComponent("fmp4.init"), request: incomplete.request)
             }
-            for (index, segment) in retrySegments.enumerated() {
-                do {
-                    try await fetch(segmentURL(playlist.media, number: segment), to: incomplete.workspace.appendingPathComponent("f_\(segment).m4s"), request: incomplete.request)
-                } catch {
-                    throw retryFailure(for: incomplete, segment: segment)
-                }
-                await update(.init(status: "Retrying \(index + 1)/\(retrySegments.count) segments…", progress: Double(index + 1) / Double(max(1, retrySegments.count))))
+            let failures = try await fetchSegments(
+                retrySegments,
+                maximumConcurrent: incomplete.request.maximumConcurrentSegments,
+                update: update,
+                statusPrefix: "Retrying"
+            ) { segment in
+                try await fetchFileIfNeeded(
+                    segmentURL(playlist.media, number: segment),
+                    to: incomplete.workspace.appendingPathComponent("f_\(segment).m4s"),
+                    request: incomplete.request,
+                    onRetry: nil
+                )
+            }
+            if let firstFailure = failures.min() {
+                throw retryFailure(for: incomplete, segment: firstFailure)
             }
         case .transportStream:
-            let baseURL = URL(string: incomplete.request.stream.url)!.deletingLastPathComponent()
-            for (index, segment) in retrySegments.enumerated() {
-                do {
-                    let file = URL(string: "\(segment).ts", relativeTo: baseURL)!.absoluteURL
-                    try await fetch(file, to: incomplete.workspace.appendingPathComponent("\(segment).ts"), request: incomplete.request)
-                } catch {
-                    throw retryFailure(for: incomplete, segment: segment)
-                }
-                await update(.init(status: "Retrying \(index + 1)/\(retrySegments.count) segments…", progress: Double(index + 1) / Double(max(1, retrySegments.count))))
+            let playlist = try await parseHLSPlaylist(sourceURL)
+            let failures = try await fetchSegments(
+                retrySegments,
+                maximumConcurrent: incomplete.request.maximumConcurrentSegments,
+                update: update,
+                statusPrefix: "Retrying"
+            ) { segment in
+                try await fetchFileIfNeeded(
+                    segmentURL(playlist.media, number: segment),
+                    to: incomplete.workspace.appendingPathComponent("\(segment).ts"),
+                    request: incomplete.request,
+                    onRetry: nil
+                )
+            }
+            if let firstFailure = failures.min() {
+                throw retryFailure(for: incomplete, segment: firstFailure)
             }
         }
 
         await update(.init(status: incomplete.request.encodeH265 ? "Encoding…" : "Merging…", progress: 1))
-        try finish(
+        try await finish(
             kind: incomplete.kind,
             workspace: incomplete.workspace,
             segments: segmentsToFinish,
@@ -1104,7 +1481,7 @@ enum DownloadEngine {
         segments: [Int],
         request: DownloadRequest,
         output: URL
-    ) throws {
+    ) async throws {
         switch kind {
         case .mpd:
             try concatenate([workspace.appendingPathComponent("video.init")] + segments.map {
@@ -1113,45 +1490,46 @@ enum DownloadEngine {
             try concatenate([workspace.appendingPathComponent("audio.init")] + segments.map {
                 workspace.appendingPathComponent("a_\($0).m4s")
             }, to: workspace.appendingPathComponent("audio.mp4"))
-            try runFFmpeg([
+            try await runFFmpeg([
                 "-y", "-i", workspace.appendingPathComponent("video.mp4").path,
                 "-i", workspace.appendingPathComponent("audio.mp4").path
-            ] + codecArguments(encodeH265: request.encodeH265) + [output.path])
+            ] + codecArguments(for: request) + [output.path])
         case .fmp4:
             try concatenate([workspace.appendingPathComponent("fmp4.init")] + segments.map {
                 workspace.appendingPathComponent("f_\($0).m4s")
             }, to: workspace.appendingPathComponent("fmp4.mp4"))
-            try runFFmpeg([
+            try await runFFmpeg([
                 "-y", "-i", workspace.appendingPathComponent("fmp4.mp4").path
-            ] + codecArguments(encodeH265: request.encodeH265) + [output.path])
+            ] + codecArguments(for: request) + [output.path])
         case .transportStream:
             let listing = segments.map { "file '\(workspace.appendingPathComponent("\($0).ts").path)'" }
                 .joined(separator: "\n")
             try listing.write(to: workspace.appendingPathComponent("list.txt"), atomically: true, encoding: .utf8)
             if request.stream.category == .radio {
-                try runFFmpeg([
+                try await runFFmpeg([
                     "-y", "-f", "concat", "-safe", "0", "-i", workspace.appendingPathComponent("list.txt").path,
                     "-map", "0:a:0", "-vn", "-c:a", "copy", "-bsf:a", "aac_adtstoasc", output.path
                 ])
             } else {
-                try runFFmpeg([
+                try await runFFmpeg([
                     "-y", "-f", "concat", "-safe", "0", "-i", workspace.appendingPathComponent("list.txt").path
-                ] + codecArguments(encodeH265: request.encodeH265) + [output.path])
+                ] + codecArguments(for: request) + [output.path])
             }
         }
     }
 
-    private static func fetchSegments(
+    static func fetchSegments(
         _ segments: [Int],
         maximumConcurrent: Int,
         update: @escaping @Sendable (DownloadUpdate) async -> Void,
+        statusPrefix: String = "Downloading",
         action: @escaping @Sendable (Int) async throws -> Void
     ) async throws -> [Int] {
         try Task.checkCancellation()
         var failures: [Int] = []
         var completed = 0
         var nextSegmentIndex = 0
-        let simultaneousDownloads = min(max(1, maximumConcurrent), segments.count)
+        let simultaneousDownloads = min(max(1, maximumConcurrent), maximumMediaTransfers, segments.count)
 
         await withTaskGroup(of: (Int, Bool).self) { group in
             func enqueueNextSegment() {
@@ -1180,7 +1558,7 @@ enum DownloadEngine {
                 completed += 1
                 if !succeeded { failures.append(segment) }
                 await update(.init(
-                    status: "Downloading segments \(completed) of \(segments.count)…",
+                    status: "\(statusPrefix) segments \(completed) of \(segments.count)…",
                     progress: Double(completed) / Double(segments.count)
                 ))
                 enqueueNextSegment()
@@ -1233,19 +1611,20 @@ enum DownloadEngine {
         workspace: URL,
         maximumConcurrent: Int,
         request: DownloadRequest,
-        update: @escaping @Sendable (DownloadUpdate) async -> Void
+        update: @escaping @Sendable (DownloadUpdate) async -> Void,
+        statusPrefix: String = "Downloading"
     ) async throws -> [Int] {
         guard !segments.isEmpty else { return [] }
-        let files = segments.flatMap { segment in
+        let files = try segments.flatMap { segment in
             [
                 MPDMediaFile(
                     segment: segment,
-                    source: segmentURL(video.media, number: segment),
+                    source: try segmentURL(video.media, number: segment),
                     output: workspace.appendingPathComponent("v_\(segment).m4s")
                 ),
                 MPDMediaFile(
                     segment: segment,
-                    source: segmentURL(audio.media, number: segment),
+                    source: try segmentURL(audio.media, number: segment),
                     output: workspace.appendingPathComponent("a_\(segment).m4s")
                 )
             ]
@@ -1255,15 +1634,16 @@ enum DownloadEngine {
         var failedSegments = Set<Int>()
         var nextFileIndex = 0
         var stopQueueing = false
-        let transferLimit = min(max(1, maximumConcurrent), files.count)
+        var completedCount = 0
+        let transferLimit = min(max(1, maximumConcurrent), maximumMediaTransfers, files.count)
 
         func completedPrefix() -> Int {
-            var count = 0
-            for segment in segments {
+            while completedCount < segments.count {
+                let segment = segments[completedCount]
                 guard failedSegments.contains(segment) == false, successfulParts[segment] == 2 else { break }
-                count += 1
+                completedCount += 1
             }
-            return count
+            return completedCount
         }
 
         await withTaskGroup(of: (MPDMediaFile, Bool).self) { group in
@@ -1280,7 +1660,7 @@ enum DownloadEngine {
                         ))
                     }
                     do {
-                        try await fetchMPDFileIfNeeded(file.source, to: file.output, request: request, onRetry: retryUpdate)
+                        try await fetchFileIfNeeded(file.source, to: file.output, request: request, onRetry: retryUpdate)
                         return (file, true)
                     } catch {
                         return (file, false)
@@ -1305,7 +1685,7 @@ enum DownloadEngine {
                 }
                 let completed = completedPrefix()
                 await update(.init(
-                    status: "Downloading segments \(min(completed + 1, segments.count)) of \(segments.count)…",
+                    status: "\(statusPrefix) segments \(min(completed + 1, segments.count)) of \(segments.count)…",
                     progress: Double(completed) / Double(segments.count)
                 ))
                 enqueueNextFile()
@@ -1315,76 +1695,7 @@ enum DownloadEngine {
         return failedSegments.sorted()
     }
 
-    private static func fetchMPDSegmentsInOrder(
-        _ segments: [Int],
-        video: MPDRepresentation,
-        audio: MPDRepresentation,
-        workspace: URL,
-        maximumConcurrent: Int,
-        request: DownloadRequest,
-        update: @escaping @Sendable (DownloadUpdate) async -> Void,
-        statusPrefix: String
-    ) async throws -> [Int] {
-        for (index, segment) in segments.enumerated() {
-            try Task.checkCancellation()
-            let position = index + 1
-            let progress = Double(index) / Double(max(1, segments.count))
-            await update(.init(
-                status: "\(statusPrefix) segment \(position) of \(segments.count)…",
-                progress: progress
-            ))
-
-            let retryUpdate: @Sendable (Int) async -> Void = { nextAttempt in
-                await update(.init(
-                    status: "Retrying segment \(position) of \(segments.count) (attempt \(nextAttempt)/\(request.retryAttempts))…",
-                    progress: progress
-                ))
-            }
-            do {
-                if maximumConcurrent > 1 {
-                    async let videoDownload: Void = fetchMPDFileIfNeeded(
-                        segmentURL(video.media, number: segment),
-                        to: workspace.appendingPathComponent("v_\(segment).m4s"),
-                        request: request,
-                        onRetry: retryUpdate
-                    )
-                    async let audioDownload: Void = fetchMPDFileIfNeeded(
-                        segmentURL(audio.media, number: segment),
-                        to: workspace.appendingPathComponent("a_\(segment).m4s"),
-                        request: request,
-                        onRetry: retryUpdate
-                    )
-                    try await videoDownload
-                    try await audioDownload
-                } else {
-                    try await fetchMPDFileIfNeeded(
-                        segmentURL(video.media, number: segment),
-                        to: workspace.appendingPathComponent("v_\(segment).m4s"),
-                        request: request,
-                        onRetry: retryUpdate
-                    )
-                    try await fetchMPDFileIfNeeded(
-                        segmentURL(audio.media, number: segment),
-                        to: workspace.appendingPathComponent("a_\(segment).m4s"),
-                        request: request,
-                        onRetry: retryUpdate
-                    )
-                }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                return [segment]
-            }
-
-            await update(.init(
-                status: "\(statusPrefix) segment \(position) of \(segments.count)…",
-                progress: Double(position) / Double(max(1, segments.count))
-            ))
-        }
-        return []
-    }
-
-    private static func fetchMPDFileIfNeeded(
+    private static func fetchFileIfNeeded(
         _ url: URL,
         to output: URL,
         request: DownloadRequest,
@@ -1410,7 +1721,8 @@ enum DownloadEngine {
                 request.setValue("https://www.bbc.co.uk/", forHTTPHeaderField: "Referer")
                 request.setValue("https://www.bbc.co.uk", forHTTPHeaderField: "Origin")
                 request.setValue("application/dash+xml, application/octet-stream;q=0.9, */*;q=0.8", forHTTPHeaderField: "Accept")
-                let (data, response) = try await URLSession.shared.data(for: request)
+                let (data, response) = try await mediaSession.data(for: request)
+                try Task.checkCancellation()
                 if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
                     throw DownloadError.httpStatus(response.statusCode, url)
                 }
@@ -1447,31 +1759,30 @@ enum DownloadEngine {
         let destination = try FileHandle(forWritingTo: output)
         defer { try? destination.close() }
         for file in files {
+            try Task.checkCancellation()
             try destination.write(contentsOf: Data(contentsOf: file))
         }
     }
 
-    private static func codecArguments(encodeH265: Bool) -> [String] {
-        encodeH265 ? ["-c:v", "libx265", "-tag:v", "hvc1", "-c:a", "copy"] : ["-c", "copy"]
+    private static func codecArguments(for request: DownloadRequest) -> [String] {
+        guard request.encodeH265 else { return ["-c", "copy"] }
+        return (request.encodingConfiguration ?? .defaults).videoArguments()
     }
 
-    private static func runFFmpeg(_ arguments: [String]) throws {
+    private static func segmentStarting(atOrBefore date: Date) -> Int {
+        Int(floor(date.timeIntervalSince1970 / segmentDuration))
+    }
+
+    private static func ffmpegExecutable() throws -> URL {
         let locations = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
-        guard let executable = locations.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+        guard let path = locations.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             throw DownloadError.ffmpegMissing
         }
-        let process = Process()
-        let errors = Pipe()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardError = errors
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let data = errors.fileHandleForReading.readDataToEndOfFile()
-            let detail = String(data: data, encoding: .utf8) ?? "ffmpeg could not create the media file."
-            throw DownloadError.processFailed(detail)
-        }
+        return URL(fileURLWithPath: path)
+    }
+
+    private static func runFFmpeg(_ arguments: [String]) async throws {
+        try await MediaProcess.run(executable: ffmpegExecutable(), arguments: ["-nostdin"] + arguments)
     }
 
     private static func runFFmpegWithEncodingProgress(
@@ -1479,53 +1790,18 @@ enum DownloadEngine {
         duration: Int,
         update: @escaping @Sendable (DownloadUpdate) async -> Void
     ) async throws {
-        let locations = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
-        guard let executable = locations.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            throw DownloadError.ffmpegMissing
-        }
-
-        let process = Process()
-        let progressPipe = Pipe()
-        let errors = Pipe()
         let reader = FFmpegProgressReader()
         let totalDuration = Double(max(duration, 1))
-
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["-v", "error", "-progress", "pipe:1", "-nostats"] + arguments
-        process.standardOutput = progressPipe
-        process.standardError = errors
-        progressPipe.fileHandleForReading.readabilityHandler = { handle in
-            for seconds in reader.consume(handle.availableData) {
+        await update(.init(status: "Encoding… 0%", progress: 0))
+        try await MediaProcess.run(
+            executable: ffmpegExecutable(),
+            arguments: ["-v", "error", "-progress", "pipe:1", "-nostats", "-nostdin"] + arguments
+        ) { data in
+            for seconds in reader.consume(data) {
                 let progress = min(0.99, max(0, seconds / totalDuration))
                 let percentage = Int((progress * 100).rounded(.down))
-                Task {
-                    await update(.init(status: "Encoding… \(percentage)%", progress: progress))
-                }
+                Task { await update(.init(status: "Encoding… \(percentage)%", progress: progress)) }
             }
-        }
-
-        await update(.init(status: "Encoding… 0%", progress: 0))
-        try process.run()
-
-        do {
-            while process.isRunning {
-                try Task.checkCancellation()
-                try await Task.sleep(for: .milliseconds(100))
-            }
-        } catch is CancellationError {
-            if process.isRunning {
-                process.terminate()
-                process.waitUntilExit()
-            }
-            progressPipe.fileHandleForReading.readabilityHandler = nil
-            throw CancellationError()
-        }
-
-        progressPipe.fileHandleForReading.readabilityHandler = nil
-        guard process.terminationStatus == 0 else {
-            let data = errors.fileHandleForReading.readDataToEndOfFile()
-            let detail = String(data: data, encoding: .utf8) ?? "ffmpeg could not create the media file."
-            throw DownloadError.processFailed(detail)
         }
         await update(.init(status: "Encoding… 100%", progress: 1))
     }
@@ -1546,11 +1822,12 @@ enum DownloadEngine {
 
                 if line.hasPrefix("out_time_us=") || line.hasPrefix("out_time_ms=") {
                     let value = line.split(separator: "=", maxSplits: 1).last.flatMap { Double($0) }
-                    if let value {
+                    if let value, value.isFinite, value >= 0 {
                         timestamps.append(value / 1_000_000)
                     }
                 }
             }
+            if buffer.count > 65_536 { buffer.removeAll(keepingCapacity: false) }
             return timestamps
         }
     }
@@ -1570,7 +1847,7 @@ enum DownloadEngine {
 
         let baseName: String
         switch request.filenameFormat {
-        case .firstSegment:
+        case .firstSegment, .askEachTime:
             baseName = "\(streamName)_\(firstSegment)"
         case .startDateTime:
             baseName = "\(streamName)_\(startDate)_\(startTime)"
@@ -1598,10 +1875,10 @@ enum DownloadEngine {
     }
 
     private static func filenameDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
+        DateFormats.filenameDate(
+            date,
+            format: UserDefaults.standard.string(forKey: "dateFormat") ?? "dd/MM/yyyy"
+        )
     }
 
     private static func filenameTime(_ date: Date) -> String {
@@ -1620,22 +1897,36 @@ enum DownloadEngine {
         name.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: " ", with: "_")
     }
 
-    private static func segmentURL(_ template: URL, number: Int) -> URL {
-        let string = fillSegmentTemplate(template.absoluteString, number: number)
-        return URL(string: string)!
+    static func segmentRange(start: Date, duration: Int, referenceStart: Date, referenceSegment: Int, segmentDuration: Double) throws -> ClosedRange<Int> {
+        guard segmentDuration.isFinite, segmentDuration > 0, duration > 0 else { throw DownloadError.invalidStream }
+        let firstOffset = floor(start.timeIntervalSince(referenceStart) / segmentDuration)
+        let lastOffset = ceil(start.addingTimeInterval(Double(duration)).timeIntervalSince(referenceStart) / segmentDuration) - 1
+        guard let first = Int(exactly: firstOffset), let last = Int(exactly: lastOffset) else { throw DownloadError.invalidStream }
+        let lower = referenceSegment.addingReportingOverflow(first)
+        let upper = referenceSegment.addingReportingOverflow(last)
+        guard !lower.overflow, !upper.overflow, lower.partialValue >= 0,
+              upper.partialValue >= lower.partialValue,
+              upper.partialValue - lower.partialValue < 1_000_000 else { throw DownloadError.invalidStream }
+        return lower.partialValue...upper.partialValue
     }
+
+    private static func segmentURL(_ template: URL, number: Int) throws -> URL {
+        let string = fillSegmentTemplate(template.absoluteString, number: number)
+        guard let url = URL(string: string) else { throw DownloadError.invalidStream }
+        return url
+    }
+
+    private static let segmentNumberPattern = try! NSRegularExpression(pattern: #"\$Number%0(\d+)d\$"#)
 
     private static func fillSegmentTemplate(_ template: String, number: Int) -> String {
         var result = template
             .replacingOccurrences(of: "$Number$", with: String(number))
             .replacingOccurrences(of: "$Time$", with: String(number))
-        let pattern = #"\$Number%0(\d+)d\$"#
-        let regex = try! NSRegularExpression(pattern: pattern)
-        let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
+        let matches = segmentNumberPattern.matches(in: result, range: NSRange(result.startIndex..., in: result)).reversed()
         for match in matches {
             guard let widthRange = Range(match.range(at: 1), in: result), let tokenRange = Range(match.range, in: result) else { continue }
-            let width = Int(result[widthRange]) ?? 0
-            result.replaceSubrange(tokenRange, with: String(format: "%0\(width)d", number))
+            let width = min(20, Int(result[widthRange]) ?? 0)
+            result.replaceSubrange(tokenRange, with: String(format: "%0*lld", Int32(width), Int64(number)))
         }
         return result
     }
@@ -1661,9 +1952,11 @@ enum DownloadEngine {
         var template = media
         template.replaceSubrange(range, with: "$Number$")
         let base = url.deletingLastPathComponent()
+        guard let initialization = URL(string: mapPath, relativeTo: base)?.absoluteURL,
+              let mediaURL = URL(string: template, relativeTo: base)?.absoluteURL else { throw DownloadError.invalidStream }
         return SegmentTemplate(
-            initialization: URL(string: mapPath, relativeTo: base)!.absoluteURL,
-            media: URL(string: template, relativeTo: base)!.absoluteURL
+            initialization: initialization,
+            media: mediaURL
         )
     }
 
@@ -1713,7 +2006,8 @@ private struct HLSPlaylist {
 }
 
 private extension DownloadEngine {
-    static func parseHLSPlaylist(_ url: URL) async throws -> HLSPlaylist {
+    static func parseHLSPlaylist(_ url: URL, depth: Int = 0) async throws -> HLSPlaylist {
+        guard depth < 8 else { throw DownloadError.invalidStream }
         var request = URLRequest(url: url)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("https://www.bbc.co.uk/", forHTTPHeaderField: "Referer")
@@ -1731,7 +2025,7 @@ private extension DownloadEngine {
                   let variantURL = URL(string: path, relativeTo: url.deletingLastPathComponent())?.absoluteURL else {
                 throw DownloadError.processFailed("This HLS stream does not provide a usable media playlist.")
             }
-            return try await parseHLSPlaylist(variantURL)
+            return try await parseHLSPlaylist(variantURL, depth: depth + 1)
         }
 
         var mediaSequence = 0
@@ -1753,6 +2047,8 @@ private extension DownloadEngine {
             } else if !line.isEmpty && !line.hasPrefix("#") {
                 guard let segmentURL = URL(string: line, relativeTo: url.deletingLastPathComponent())?.absoluteURL else { continue }
                 let duration = pendingDuration ?? 6.4
+                guard duration.isFinite, duration > 0, mediaSequence >= 0,
+                      mediaSequence <= Int.max - segments.count else { throw DownloadError.invalidStream }
                 let start = pendingStart ?? runningStart
                 segments.append((segmentURL, duration, mediaSequence + segments.count, start))
                 if let start {
@@ -1864,7 +2160,12 @@ private final class MPDParser: NSObject, XMLParserDelegate {
         switch name {
         case "MPD":
             if let value = attributeDict["availabilityStartTime"] {
-                availabilityStartTime = ISO8601DateFormatter().date(from: value)
+                let formatter = ISO8601DateFormatter()
+                availabilityStartTime = formatter.date(from: value)
+                if availabilityStartTime == nil {
+                    formatter.formatOptions.insert(.withFractionalSeconds)
+                    availabilityStartTime = formatter.date(from: value)
+                }
             }
         case "BaseURL":
             baseURLText = ""
@@ -1932,12 +2233,18 @@ private final class MPDParser: NSObject, XMLParserDelegate {
                 ? .audio : .video
             let initialization = template.initialization.replacingOccurrences(of: "$RepresentationID$", with: representation.identifier)
             let media = template.media.replacingOccurrences(of: "$RepresentationID$", with: representation.identifier)
+            guard template.timescale > 0, template.duration.map({ $0 > 0 }) ?? true,
+                  let initializationURL = URL(string: initialization, relativeTo: mediaBaseURL)?.absoluteURL,
+                  let mediaURL = URL(string: media, relativeTo: mediaBaseURL)?.absoluteURL else {
+                self.representation = nil
+                return
+            }
             let segmentDuration = template.duration.map { Double($0) / Double(template.timescale) }
             representations.append(MPDRepresentation(
                 type: type,
                 bandwidth: representation.bandwidth,
-                initialization: URL(string: initialization, relativeTo: mediaBaseURL)!.absoluteURL,
-                media: URL(string: media, relativeTo: mediaBaseURL)!.absoluteURL,
+                initialization: initializationURL,
+                media: mediaURL,
                 segmentDuration: segmentDuration,
                 startNumber: template.startNumber
             ))

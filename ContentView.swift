@@ -244,54 +244,45 @@ private enum AppKeybinding: String, CaseIterable, Identifiable {
     }
 }
 
-private enum AppAppearance: String, CaseIterable, Hashable {
-    case system
-    case light
-    case dark
+private enum CompletionPlaybackMode: String, CaseIterable, Hashable {
+    case each
+    case first
+    case last
 
     var title: String {
         switch self {
-        case .system: "System"
-        case .light: "Light"
-        case .dark: "Dark"
-        }
-    }
-
-    var colorScheme: ColorScheme? {
-        switch self {
-        case .system: nil
-        case .light: .light
-        case .dark: .dark
+        case .each: "Each download as it completes"
+        case .first: "First download only"
+        case .last: "Last download only"
         }
     }
 }
 
 struct ContentView: View {
     @EnvironmentObject private var streamStore: StreamStore
-    @Environment(\.colorScheme) private var colorScheme
-    @AppStorage("encodeH265") private var encodeH265 = false
     @AppStorage("downloadDefaultHours") private var defaultHours = 0
     @AppStorage("downloadDefaultMinutes") private var defaultMinutes = 1
     @AppStorage("downloadDefaultSeconds") private var defaultSeconds = 0
     @AppStorage("dateFormat") private var dateFormat = "dd/MM/yyyy"
     @AppStorage("downloadFolder") private var downloadFolderPath = ""
     @AppStorage("revealFinishedVideo") private var revealFinishedMedia = false
-    @AppStorage("checkForUpdates") private var checkForUpdates = true
+    @AppStorage(UpdateCheckFrequency.preferenceKey) private var updateCheckFrequency = UpdateCheckFrequency.onLaunch.rawValue
     @AppStorage("downloadAttempts") private var downloadAttempts = 3
     @AppStorage("retryDelay") private var retryDelay = 2.0
     @AppStorage("sequentialDownloads") private var sequentialDownloads = false
     @AppStorage("segmentDownloadLimit") private var segmentDownloadLimit = 5
+    @AppStorage(StreamAvailabilityPreferences.enabledKey) private var checkStreamAvailability = StreamAvailabilityPreferences.defaultEnabled
+    @AppStorage(StreamAvailabilityPreferences.intervalKey) private var streamAvailabilityInterval = StreamAvailabilityPreferences.defaultInterval
+    @AppStorage(StreamAvailabilityPreferences.startInAppKey) private var showStreamCheckStartInAppNotification = true
+    @AppStorage(StreamAvailabilityPreferences.activeOnlineOnlyKey) private var activeOnlineOnly = false
     @AppStorage("streamLaunchFilter") private var launchStreamFilter = "All"
     @AppStorage("activeStreamCategoryFilter") private var activeStreamCategoryFilter = ""
     @AppStorage("activeFavouritesOnly") private var activeFavouritesOnly = false
-    @AppStorage("downloadFilenameFormat") private var downloadFilenameFormat = DownloadFilenameFormat.firstSegment.rawValue
+    @AppStorage("downloadFilenameFormat") private var downloadFilenameFormat = DownloadFilenameFormat.defaultFormat.rawValue
     @AppStorage("appearanceMode") private var appearanceMode = AppAppearance.system.rawValue
     @AppStorage("downloadStartInAppNotification") private var showDownloadStartInAppNotification = true
-    @AppStorage("downloadStartSystemNotification") private var showDownloadStartSystemNotification = false
     @AppStorage("downloadCompletionInAppNotification") private var showDownloadCompletionInAppNotification = true
-    @AppStorage("downloadCompletionSystemNotification") private var showDownloadCompletionSystemNotification = false
     @AppStorage("downloadFailureInAppNotification") private var showDownloadFailureInAppNotification = true
-    @AppStorage("downloadFailureSystemNotification") private var showDownloadFailureSystemNotification = false
     @AppStorage(AppKeybinding.addDownloadToQueue.rawValue) private var addDownloadToQueueKey = AppKeybinding.addDownloadToQueue.defaultShortcut.storedValue
     @AppStorage(AppKeybinding.showDownloadQueue.rawValue) private var showDownloadQueueKey = AppKeybinding.showDownloadQueue.defaultShortcut.storedValue
     @AppStorage(AppKeybinding.toggleEncode.rawValue) private var toggleEncodeKey = AppKeybinding.toggleEncode.defaultShortcut.storedValue
@@ -305,6 +296,7 @@ struct ContentView: View {
     @AppStorage(AppKeybinding.openManageStreams.enabledStorageKey) private var openManageStreamsShortcutEnabled = true
     @AppStorage(AppKeybinding.download.enabledStorageKey) private var downloadShortcutEnabled = true
 
+    @State private var encodeH265 = EncodingConfiguration.defaultEnabled
     @State private var startDate = Date()
     @State private var hours = 0
     @State private var minutes = 1
@@ -323,18 +315,31 @@ struct ContentView: View {
     @State private var queueConfirmationID = UUID()
     @StateObject private var updateChecker = UpdateChecker()
     @StateObject private var timeOptionsStore = TimeOptionsStore()
+    @StateObject private var streamAvailability = StreamAvailabilityMonitor()
     @ObservedObject private var downloadController: DownloadController
     @State private var shortcutEventMonitor: Any?
 
     init(downloadController: DownloadController) {
         _downloadController = ObservedObject(wrappedValue: downloadController)
+        let defaults = UserDefaults.standard
+        _encodeH265 = State(initialValue: defaults.object(forKey: "encodeH265") as? Bool ?? EncodingConfiguration.defaultEnabled)
+        let start = Date()
+        _startDate = State(initialValue: start)
+        _dateInput = State(initialValue: DateFormats.formatter(for: defaults.string(forKey: "dateFormat") ?? "dd/MM/yyyy").string(from: start))
+        _timeInput = State(initialValue: Self.timeFormatter.string(from: start))
+        _hours = State(initialValue: min(350, max(0, defaults.integer(forKey: "downloadDefaultHours"))))
+        _minutes = State(initialValue: defaults.object(forKey: "downloadDefaultMinutes") == nil ? 1 : min(59, max(0, defaults.integer(forKey: "downloadDefaultMinutes"))))
+        _seconds = State(initialValue: min(59, max(0, defaults.integer(forKey: "downloadDefaultSeconds"))))
     }
 
     private var activeFilteredStreams: [Stream] {
-        let category = StreamCategory.allCases.first { $0.title == activeStreamCategoryFilter }
+        let filter = StreamListFilter(
+            category: StreamCategory.allCases.first { $0.title == activeStreamCategoryFilter },
+            favouritesOnly: activeFavouritesOnly,
+            onlineOnly: checkStreamAvailability && activeOnlineOnly
+        )
         return streamStore.streams.filter { stream in
-            (!activeFavouritesOnly || stream.isFavourite)
-                && (category == nil || stream.category == category)
+            filter.matches(stream, availability: streamAvailability.results[stream.url]?.state)
         }
     }
 
@@ -352,14 +357,6 @@ struct ContentView: View {
             && duration > 0
             && isValidStartDate(startDate)
             && isValidEndDate(startDate, duration: duration)
-    }
-
-    private var isTextInputOrMenuActive: Bool {
-        guard let responder = NSApp.keyWindow?.firstResponder else { return false }
-        return responder is NSTextView
-            || responder is NSTextField
-            || responder is NSComboBox
-            || responder is NSPopUpButton
     }
 
     private func handleMainShortcut(_ shortcut: AppShortcut) -> Bool {
@@ -424,6 +421,7 @@ struct ContentView: View {
 
     private func applyLaunchFilterToActiveFilter() {
         activeFavouritesOnly = launchStreamFilter == "Favourites"
+        activeOnlineOnly = launchStreamFilter == "Online" && checkStreamAvailability
         activeStreamCategoryFilter = StreamCategory.allCases
             .first { $0.title == launchStreamFilter }?
             .title ?? ""
@@ -448,6 +446,7 @@ struct ContentView: View {
             AnyView(
                 StreamManagementView()
                     .environmentObject(streamStore)
+                    .environmentObject(streamAvailability)
             )
         }
     }
@@ -468,7 +467,7 @@ struct ContentView: View {
         .childWindow(
             isPresented: $isShowingDownloadQueue,
             title: "Download queue",
-            size: NSSize(width: 560, height: 520)
+            size: NSSize(width: ControlMetrics.mainWindowWidth, height: 520)
         ) {
             AnyView(DownloadQueueView(downloadController: downloadController))
         }
@@ -487,11 +486,22 @@ struct ContentView: View {
         .onDisappear(perform: removeShortcutEventMonitor)
         .onChange(of: startDate) { _, _ in syncDateInputs() }
         .onChange(of: dateFormat) { _, _ in syncDateInputs() }
+        .onChange(of: appearanceMode) { _, mode in
+            (AppAppearance(rawValue: mode) ?? .system).apply()
+        }
+        .onChange(of: activeFilteredStreams.map(\.id)) { _, ids in
+            if !ids.contains(streamStore.selectedStreamID ?? "") {
+                streamStore.selectedStreamID = ids.first
+            }
+        }
         .onChange(of: defaultHours) { _, _ in applyDefaultDuration() }
         .onChange(of: defaultMinutes) { _, _ in applyDefaultDuration() }
         .onChange(of: defaultSeconds) { _, _ in applyDefaultDuration() }
         .onChange(of: downloadController.downloadStartID) { _, _ in
             handleDownloadStarted()
+        }
+        .onChange(of: streamAvailability.lastCheckStarted?.id) { _, _ in
+            handleStreamStatusCheckStarted()
         }
         .onChange(of: downloadController.completedOutput) { _, output in
             handleCompletedOutputChange(output)
@@ -505,16 +515,22 @@ struct ContentView: View {
         .onChange(of: downloadController.errorMessage) { _, message in
             handleDownloadFailureMessageChange(message)
         }
-        .task {
-            if checkForUpdates {
-                await updateChecker.check()
-            }
+        .task(id: updateCheckFrequency) {
+            await updateChecker.run(frequency: UpdateCheckFrequency(rawValue: updateCheckFrequency) ?? .onLaunch)
         }
-        .preferredColorScheme((AppAppearance(rawValue: appearanceMode) ?? .system).colorScheme)
-        .contentShape(Rectangle())
-        .simultaneousGesture(TapGesture().onEnded {
-            NSApp.keyWindow?.makeFirstResponder(nil)
-        })
+        .task(id: StreamAvailabilitySchedule(
+            isEnabled: checkStreamAvailability,
+            interval: streamAvailabilityInterval,
+            urls: streamStore.streams.map(\.url),
+            refreshID: streamAvailability.refreshID
+        ), priority: .background) {
+            await streamAvailability.run(StreamAvailabilitySchedule(
+                isEnabled: checkStreamAvailability,
+                interval: streamAvailabilityInterval,
+                urls: streamStore.streams.map(\.url),
+                refreshID: streamAvailability.refreshID
+            ))
+        }
         .modifier(BBCD4DialogModifier(
             downloadController: downloadController,
             validationMessage: $validationMessage,
@@ -534,12 +550,6 @@ struct ContentView: View {
 
     private func configureMainWindow() {
         DownloadNotifications.migrateLegacyPreferenceIfNeeded()
-        showDownloadStartInAppNotification = UserDefaults.standard.bool(forKey: "downloadStartInAppNotification")
-        showDownloadStartSystemNotification = UserDefaults.standard.bool(forKey: "downloadStartSystemNotification")
-        showDownloadCompletionInAppNotification = UserDefaults.standard.bool(forKey: "downloadCompletionInAppNotification")
-        showDownloadCompletionSystemNotification = UserDefaults.standard.bool(forKey: "downloadCompletionSystemNotification")
-        showDownloadFailureInAppNotification = UserDefaults.standard.bool(forKey: "downloadFailureInAppNotification")
-        showDownloadFailureSystemNotification = UserDefaults.standard.bool(forKey: "downloadFailureSystemNotification")
         applyLaunchFilterToActiveFilter()
         applyDefaultDuration()
         syncDateInputs()
@@ -566,17 +576,23 @@ struct ContentView: View {
     private func handleDownloadStarted() {
         guard let request = downloadController.lastDownloadStarted else { return }
         guard showDownloadStartInAppNotification else { return }
-        let displayDuration = downloadController.lastDownloadStartedFromQueue ? 5.0 : 3.0
-        let message = DownloadNotifications.startMessage(for: request)
+        let displayDuration = downloadController.lastDownloadStartedFromQueue ? 7.0 : 5.0
+        let message = DownloadNotifications.inAppStartMessage(for: request)
         showQueueConfirmation(message, displayDuration: displayDuration)
     }
 
+    private func handleStreamStatusCheckStarted() {
+        guard checkStreamAvailability, let event = streamAvailability.lastCheckStarted else { return }
+        DownloadNotifications.postStreamStatusCheckStarted(event)
+        guard showStreamCheckStartInAppNotification,
+              !isSecondaryWindowFocused(title: "Manage streams") else { return }
+        showQueueConfirmation(event.message, displayDuration: 5)
+    }
+
     private func handleCompletedOutputChange(_ output: URL?) {
-        guard let output else { return }
-        if revealFinishedMedia {
-            NSWorkspace.shared.open(output)
-            clearCompletedDownload()
-        } else if !showDownloadCompletionInAppNotification {
+        guard output != nil else { return }
+        // Playback happens before the controller advances the queue.
+        if revealFinishedMedia || !showDownloadCompletionInAppNotification {
             clearCompletedDownload()
         }
     }
@@ -610,14 +626,20 @@ struct ContentView: View {
 
     private var downloadForm: some View {
         VStack(alignment: .leading, spacing: ControlMetrics.formSectionSpacing) {
-            AnyView(mainHeader)
-            AnyView(streamPicker)
-            AnyView(startDateAndTimeFields)
-            AnyView(durationFields)
+            VStack(alignment: .leading, spacing: ControlMetrics.headerSectionSpacing) {
+                AnyView(mainHeader)
+                VStack(alignment: .leading, spacing: ControlMetrics.inputRowSpacing) {
+                    streamPicker
+                    startDateAndTimeFields
+                    durationFields
+                }
+            }
             AnyView(downloadActionControls)
         }
         .frame(width: ControlMetrics.mainContentWidth, alignment: .leading)
-        .padding(24)
+        .padding(.horizontal, 24)
+        .padding(.top, 12)
+        .padding(.bottom, 12)
     }
 
     private var duration: Int {
@@ -626,25 +648,32 @@ struct ContentView: View {
 
     private var mainHeader: some View {
         HStack(alignment: .center) {
-            Text("Stream downloaderer IV")
+            Text("BBCD4")
                 .font(.largeTitle.weight(.bold))
             Spacer()
             if updateChecker.release != nil {
                 Button {
                     isShowingUpdate = true
                 } label: {
-                    Label("Update available!", systemImage: "arrow.down.circle.fill")
+                    Label("Update", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(HoverUpdateButtonStyle())
             }
         }
+        .frame(height: 44)
     }
 
     private var streamPicker: some View {
         VStack(alignment: .leading, spacing: ControlMetrics.labelToControlSpacing) {
             MainFormLabel("Choose stream")
             HStack(spacing: ControlMetrics.iconButtonGap) {
-                StreamSelector(streams: activeFilteredStreams, selection: $streamStore.selectedStreamID)
+                StreamSelector(
+                    streams: activeFilteredStreams,
+                    groups: streamStore.groups,
+                    selection: $streamStore.selectedStreamID,
+                    availability: checkStreamAvailability ? streamAvailability.results : nil,
+                    checkingURLs: streamAvailability.checkingURLs
+                )
                     .frame(width: ControlMetrics.streamSelectorWidth, height: ControlMetrics.height)
                 Button {
                     showSecondaryWindow(title: "Manage streams", isPresented: $isManagingStreams)
@@ -708,15 +737,17 @@ struct ContentView: View {
     }
 
     private var downloadStatusFooter: some View {
-        VStack(spacing: 10) {
-            HStack {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
                 Text(downloadController.status)
                     .font(.headline)
                     .lineLimit(1)
-                Spacer()
+                Spacer(minLength: 12)
                 Text("Saves to \(downloadFolderSummary)")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .truncationMode(.middle)
                     .hoverHint(downloadFolder.path, alignment: .topTrailing)
             }
             DownloadProgressTrack(
@@ -729,46 +760,35 @@ struct ContentView: View {
     }
 
     private var queueConfirmationArea: some View {
-        Spacer(minLength: 16)
-            .frame(maxWidth: .infinity)
-            .overlay {
-                Text(queueConfirmationMessage)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(
-                        .quaternary,
-                        in: RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous)
-                            .stroke(Color.primary.opacity(ControlMetrics.controlBorderOpacity), lineWidth: 1)
-                    }
-                    .frame(maxWidth: ControlMetrics.mainContentWidth)
-                    .opacity(isShowingQueueConfirmation ? 1 : 0)
-                    .offset(y: -14)
-                    .animation(.easeInOut(duration: 0.3), value: isShowingQueueConfirmation)
-                    .allowsHitTesting(false)
-            }
+        InAppNotificationMessage(message: queueConfirmationMessage)
+            .frame(maxWidth: ControlMetrics.mainContentWidth)
+            .opacity(isShowingQueueConfirmation ? 1 : 0)
+            .frame(maxWidth: .infinity, minHeight: 32, maxHeight: .infinity, alignment: .top)
+            .animation(.easeInOut(duration: 0.3), value: isShowingQueueConfirmation)
+            .allowsHitTesting(false)
     }
 
     private var downloadActionControls: some View {
-        HStack(spacing: 24) {
-            HStack(spacing: ControlMetrics.fieldGap) {
-                primaryDownloadButton
-                downloadQueueButtons
-            }
-            if !selectedStreamIsRadio {
+        VStack(alignment: .leading, spacing: ControlMetrics.encodeRowSpacing) {
+            if selectedStreamIsRadio {
+                encodeToggle
+                    .hidden()
+                    .disabled(true)
+                    .accessibilityHidden(true)
+            } else {
                 encodeToggle
             }
-            Spacer()
-            connectionAndSettingsButtons
+            HStack(spacing: ControlMetrics.fieldGap) {
+                HStack(spacing: ControlMetrics.fieldGap) {
+                    primaryDownloadButton
+                    downloadQueueButtons
+                }
+                Spacer()
+                settingsButton
+            }
+            .frame(height: ControlMetrics.actionRowHeight)
         }
         .frame(width: ControlMetrics.mainContentWidth)
-        .padding(.top, 12)
     }
 
     private var primaryDownloadButton: some View {
@@ -799,8 +819,22 @@ struct ContentView: View {
             .hoverHint("Add download to queue", isEnabled: canAddToQueue)
 
             Button(action: showDownloadQueue) {
-                Image(systemName: "list.bullet")
-                    .font(.system(size: 16, weight: .medium))
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 16, weight: .medium))
+                    if !downloadController.queue.isEmpty {
+                        Text("\(downloadController.queue.count)")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 18, minHeight: 18)
+                            .background(Color.red, in: Capsule())
+                            .overlay {
+                                Capsule().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1)
+                            }
+                            .offset(x: 12, y: -12)
+                            .accessibilityLabel("\(downloadController.queue.count) downloads in queue")
+                    }
+                }
             }
             .buttonStyle(HoverGlassIconButtonStyle())
             .frame(width: 44, height: ControlMetrics.height)
@@ -822,44 +856,22 @@ struct ContentView: View {
         Toggle("Encode", isOn: $encodeH265)
             .toggleStyle(.checkbox)
             .hoverHint(
-                "Encode to H.265 for better compatibility with Apple devices.\nThis can be a slow process.",
-                alignment: .top
+                "Encode to H.265 to improve compatibility",
+                alignment: .topLeading
             )
     }
 
-    private var connectionAndSettingsButtons: some View {
-        HStack(spacing: ControlMetrics.iconButtonGap) {
-            Button(action: openDiscord) {
-                discordButtonImage
-            }
-            .buttonStyle(HoverGlassButtonStyle())
-            .frame(width: 44, height: 44)
-            .hoverHint("BBC Fans Discord server", alignment: .topTrailing)
-
-            Button {
-                showSecondaryWindow(title: "Settings", isPresented: $isShowingSettings)
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(HoverGlassButtonStyle())
-            .frame(width: 44, height: 44)
-            .hoverHint("Settings", alignment: .topTrailing)
-        }
-    }
-
-    @ViewBuilder
-    private var discordButtonImage: some View {
-        if let discord = loadImage(named: colorScheme == .light ? "Discord-Symbol-Black" : "Discord-Symbol-White") {
-            Image(nsImage: discord)
-                .resizable()
-                .interpolation(.high)
-                .scaledToFit()
+    private var settingsButton: some View {
+        Button {
+            showSecondaryWindow(title: "Settings", isPresented: $isShowingSettings)
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 16, weight: .medium))
                 .frame(width: 22, height: 22)
-        } else {
-            Image(systemName: "bubble.left.and.bubble.right.fill")
         }
+        .buttonStyle(HoverGlassButtonStyle())
+        .frame(width: 44, height: 44)
+        .hoverHint("Settings", alignment: .topTrailing)
     }
 
     private var downloadFolder: URL {
@@ -870,23 +882,7 @@ struct ContentView: View {
     }
 
     private var downloadFolderSummary: String {
-        let folder = downloadFolder
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        guard folder.path.hasPrefix(home) else { return folder.path }
-
-        let relativeParts = folder.path.dropFirst(home.count)
-            .split(separator: "/")
-            .map(String.init)
-        switch relativeParts.count {
-        case 0:
-            return folder.lastPathComponent
-        case 1:
-            return relativeParts[0]
-        case 2:
-            return "\(relativeParts[0])/\(relativeParts[1])"
-        default:
-            return "\(relativeParts[0])/…/\(relativeParts.last!)"
-        }
+        downloadFolder.lastPathComponent
     }
 
     private func chooseDownloadFolder() {
@@ -913,9 +909,10 @@ struct ContentView: View {
             outputFolder: downloadFolder,
             encodeH265: encodeH265,
             retryAttempts: max(1, min(10, downloadAttempts)),
-            retryDelay: max(1, min(10, retryDelay)),
+            retryDelay: DownloadLimits.retryDelay(retryDelay),
             maximumConcurrentSegments: sequentialDownloads ? 1 : max(1, min(50, segmentDownloadLimit)),
-            filenameFormat: DownloadFilenameFormat(rawValue: downloadFilenameFormat) ?? .firstSegment
+            filenameFormat: DownloadFilenameFormat(rawValue: downloadFilenameFormat) ?? .defaultFormat,
+            encodingConfiguration: EncodingConfiguration.load()
         )
         if addToQueue, downloadController.isDownloading {
             downloadController.enqueue(request)
@@ -947,9 +944,9 @@ struct ContentView: View {
     }
 
     private func applyDefaultDuration() {
-        hours = defaultHours
-        minutes = defaultMinutes
-        seconds = defaultSeconds
+        hours = min(350, max(0, defaultHours))
+        minutes = min(59, max(0, defaultMinutes))
+        seconds = min(59, max(0, defaultSeconds))
     }
 
     private func commitDate() {
@@ -983,6 +980,9 @@ struct ContentView: View {
     private func applyCalendarDate(_ date: Date) {
         applyDate(date)
         isShowingCalendar = false
+        DispatchQueue.main.async {
+            NSApp.windows.first(where: { $0.title == "BBCD4" })?.makeFirstResponder(nil)
+        }
     }
 
     private func applyDate(_ date: Date) {
@@ -1039,16 +1039,6 @@ struct ContentView: View {
         streamStore.selectedStream?.category == .radio
     }
 
-    private func loadImage(named name: String) -> NSImage? {
-        guard let url = AppResources.url(forResource: name, withExtension: "svg") else { return nil }
-        return NSImage(contentsOf: url)
-    }
-
-    private func openDiscord() {
-        guard let url = URL(string: "https://discord.gg/KRWsWmFS5r") else { return }
-        NSWorkspace.shared.open(url)
-    }
-
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_GB")
@@ -1075,6 +1065,7 @@ private struct BBCD4DialogModifier: ViewModifier {
     let release: AvailableRelease?
     let showCompletionNotification: Bool
     let showFailureNotification: Bool
+    @State private var isShowingIncompleteDownload = false
 
     private var isDownloadCompletePresented: Binding<Bool> {
         Binding(
@@ -1095,6 +1086,7 @@ private struct BBCD4DialogModifier: ViewModifier {
         Binding(
             get: {
                 showFailureNotification &&
+                    downloadController.incompleteDownload == nil &&
                     downloadController.errorMessage != nil
             },
             set: { if !$0 { downloadController.errorMessage = nil } }
@@ -1117,20 +1109,28 @@ private struct BBCD4DialogModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .overlay {
-                if let incomplete = downloadController.incompleteDownload,
-                   showFailureNotification {
-                    ZStack {
-                        Color.black.opacity(0.38)
-                            .ignoresSafeArea()
-                        IncompleteDownloadDialog(
-                            incomplete: incomplete,
-                            save: { downloadController.savePartialDownload() },
-                            abort: { downloadController.discardIncompleteDownload() },
-                            retry: { downloadController.retryIncompleteDownload() }
-                        )
-                    }
+            .onReceive(downloadController.$incompleteDownload) { incomplete in
+                isShowingIncompleteDownload = showFailureNotification && incomplete != nil
+            }
+            .onChange(of: showFailureNotification) { _, enabled in
+                isShowingIncompleteDownload = enabled && downloadController.incompleteDownload != nil
+            }
+            .alert("Download incomplete", isPresented: $isShowingIncompleteDownload, presenting: downloadController.incompleteDownload) { _ in
+                Button("Retry") {
+                    downloadController.errorMessage = nil
+                    downloadController.retryIncompleteDownload()
                 }
+                .keyboardShortcut(.defaultAction)
+                Button("Save") {
+                    downloadController.errorMessage = nil
+                    downloadController.savePartialDownload()
+                }
+                Button("Abort", role: .cancel) {
+                    downloadController.errorMessage = nil
+                    downloadController.discardIncompleteDownload()
+                }
+            } message: { incomplete in
+                Text(incompleteDownloadMessage(incomplete))
             }
             .alert("Download complete!", isPresented: isDownloadCompletePresented) {
                 Button("Show media") {
@@ -1168,31 +1168,41 @@ private struct BBCD4DialogModifier: ViewModifier {
                 Text("The current download will be cancelled.")
             }
     }
+
+    private func incompleteDownloadMessage(_ incomplete: IncompleteDownload) -> String {
+        var message = "Failed to download \(incomplete.failedSegments.count) of \(incomplete.segments.count) segments."
+        if let error = downloadController.errorMessage, !error.isEmpty {
+            message += "\n\n" + error
+        }
+        return message + "\n\nRetry the missing segments, save the downloaded parts, or abort without saving."
+    }
 }
 
-private enum ControlMetrics {
+enum ControlMetrics {
     static let height: CGFloat = 32
-    static let formSectionSpacing: CGFloat = 22
+    static let formSectionSpacing: CGFloat = 12
+    static let headerSectionSpacing: CGFloat = 12
+    static let encodeRowSpacing: CGFloat = 10
+    static let actionRowHeight: CGFloat = 44
+    static let inputRowSpacing: CGFloat = 18
     static let formLabelHeight: CGFloat = 24
     static let labelToControlSpacing: CGFloat = 9
-    static let durationCaptionHeight: CGFloat = 14
     static let cornerRadius: CGFloat = 10
     static let hoverOpacity = 0.08
     static let controlBorderOpacity = 0.10
-    static let accessoryWidth: CGFloat = 44
     static let dateTimeAccessoryWidth: CGFloat = 44
     static let timeChevronOffset: CGFloat = 0
     static let timeChevronHitWidth: CGFloat = 38
     static let timeChevronHitHeight: CGFloat = 32
     static let durationAccessoryWidth: CGFloat = 28
-    static let durationArrowOffset: CGFloat = 10
     static let fieldGap: CGFloat = 16
     static let iconButtonGap: CGFloat = 8
     static let settingsRowHeight: CGFloat = 24
     static let dateWidth: CGFloat = 160
     static let timeWidth: CGFloat = 160
-    static let mainContentWidth: CGFloat = 472
-    static let streamSelectorWidth = mainContentWidth - accessoryWidth - iconButtonGap
+    static let mainContentWidth = streamSelectorWidth + iconButtonGap + 44
+    static let mainWindowWidth = mainContentWidth + 48
+    static let streamSelectorWidth = durationRowWidth
     static var dateTimeValueWidth: CGFloat { dateWidth - dateTimeAccessoryWidth }
     static var timeValueWidth: CGFloat { timeWidth - timeChevronHitWidth }
     static let durationWidth = (dateWidth + timeWidth - fieldGap) / 3
@@ -1218,7 +1228,7 @@ private struct UpdateReleaseNotesView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Release notes")
+                    Text("What's new:")
                         .font(.headline)
                     Text(release.notes.isEmpty ? "Full details are available on GitHub." : release.notes)
                         .font(.body)
@@ -1249,6 +1259,25 @@ private struct UpdateReleaseNotesView: View {
     }
 }
 
+private struct InAppNotificationMessage: View {
+    let message: String
+
+    var body: some View {
+        Text(message)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(Color.primary.opacity(ControlMetrics.controlBorderOpacity), lineWidth: 1)
+            }
+    }
+}
+
 private struct MainFormLabel: View {
     let title: String
 
@@ -1269,7 +1298,6 @@ private enum SettingsLayout {
     static let sheetHeight: CGFloat = 720
     static let horizontalInset: CGFloat = 24
     static let scrollbarReserve: CGFloat = 18
-    static let contentWidth = sheetWidth - (horizontalInset * 2) - scrollbarReserve
 }
 private struct SharedControlHoverEffect: ViewModifier {
     let cornerRadius: CGFloat
@@ -1391,6 +1419,23 @@ private struct HoverUpdateButton: View {
     }
 }
 
+private struct HoverHintLayout: Layout {
+    let horizontalAlignment: HorizontalAlignment
+    let below: Bool
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions(by: .zero)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let tooltip = subviews.first else { return }
+        let size = tooltip.sizeThatFits(ProposedViewSize(width: 300, height: nil))
+        let x = horizontalAlignment == .trailing ? bounds.maxX - size.width : bounds.minX
+        let y = below ? bounds.maxY + 8 : bounds.minY - size.height - 8
+        tooltip.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: ProposedViewSize(size))
+    }
+}
+
 private struct DelayedHoverHint: ViewModifier {
     let message: String
     let alignment: Alignment
@@ -1398,12 +1443,13 @@ private struct DelayedHoverHint: ViewModifier {
     let isEnabled: Bool
     @State private var isVisible = false
     @State private var pendingWork: DispatchWorkItem?
+    @State private var isMenuTracking = false
 
     func body(content: Content) -> some View {
         content
             .onHover { isHovering in
                 pendingWork?.cancel()
-                guard isEnabled, isHovering else {
+                guard isEnabled, isHovering, !isMenuTracking else {
                     isVisible = false
                     return
                 }
@@ -1414,23 +1460,36 @@ private struct DelayedHoverHint: ViewModifier {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
                 }
             }
-            .overlay(alignment: alignment) {
+            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+                isMenuTracking = true
+                pendingWork?.cancel()
+                isVisible = false
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+                isMenuTracking = false
+            }
+            .onChange(of: isEnabled) { _, enabled in
+                if !enabled {
+                    pendingWork?.cancel()
+                    isVisible = false
+                }
+            }
+            .overlay {
                 if isVisible {
-                    Text(message)
-                        .font(.caption)
-                        .lineLimit(nil)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: true, vertical: true)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .stroke(.white.opacity(0.14), lineWidth: 1)
-                        }
-                        .offset(y: below ? ControlMetrics.height + 4 : (message.contains("\n") ? -45 : -34))
-                        .zIndex(1)
-                        .allowsHitTesting(false)
+                    HoverHintLayout(horizontalAlignment: alignment.horizontal, below: below) {
+                        Text(message)
+                            .font(.system(size: 11))
+                            .lineLimit(nil)
+                            .multilineTextAlignment(.leading)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .stroke(.white.opacity(0.14), lineWidth: 1)
+                            }
+                    }
+                    .allowsHitTesting(false)
                 }
             }
             .onDisappear { pendingWork?.cancel() }
@@ -1509,120 +1568,87 @@ private struct HoverGlassIconButton: View {
             )
     }
 }
-private struct IncompleteDownloadDialog: View {
-    @Environment(\.colorScheme) private var colorScheme
-    let incomplete: IncompleteDownload
-    let save: () -> Void
-    let abort: () -> Void
-    let retry: () -> Void
+private extension StreamAvailabilityState {
+    var indicatorColor: Color {
+        switch self {
+        case .unknown: .secondary
+        case .online: .green
+        case .offline: .red
+        }
+    }
+
+    var menuImage: NSImage {
+        let color: NSColor
+        switch self {
+        case .unknown: color = .secondaryLabelColor
+        case .online: color = .systemGreen
+        case .offline: color = .systemRed
+        }
+        let image = NSImage(size: NSSize(width: 8, height: 8), flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: rect).fill()
+            return true
+        }
+        image.accessibilityDescription = title
+        return image
+    }
+}
+
+private struct StreamAvailabilityIndicator: View {
+    let result: StreamAvailabilityResult?
+    var isChecking = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Failed to download \(incomplete.failedSegments.count) of \(incomplete.segments.count) segments")
-                .font(.headline.weight(.semibold))
-
-            Text("""
-            You can either:
-            • Retry download from the failed segment
-            • Abort without saving
-            • Save any successfully downloaded segments
-            """)
-            .font(.body)
-            .foregroundStyle(Color.primary.opacity(0.68))
-            .fixedSize(horizontal: false, vertical: true)
-
-            VStack(spacing: 9) {
-                DialogActionButton(title: "Retry", style: .primary, action: retry)
-                DialogActionButton(title: "Abort", style: .destructive, action: abort)
-                DialogActionButton(title: "Save", style: .secondary, action: save)
+        Group {
+            if isChecking {
+                ProgressView()
+                    .controlSize(.mini)
+                    .scaleEffect(0.6)
+                    .accessibilityLabel("Checking stream status")
+            } else {
+                Circle()
+                    .fill((result?.state ?? .unknown).indicatorColor)
+                    .accessibilityLabel(result?.state.title ?? StreamAvailabilityState.unknown.title)
             }
         }
-        .padding(22)
-        .frame(width: 350)
-        .background(
-            Color(nsColor: .windowBackgroundColor),
-            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(Color.primary.opacity(colorScheme == .light ? 0.16 : 0.20), lineWidth: 1)
-        }
-        .shadow(
-            color: .black.opacity(colorScheme == .light ? 0.22 : 0.4),
-            radius: 30,
-            y: 12
-        )
+        .frame(width: 8, height: 8)
+    }
+
+    static var loadingMenuImage: NSImage? {
+        let image = NSImage(systemSymbolName: "hourglass", accessibilityDescription: "Checking stream status")
+        image?.size = NSSize(width: 8, height: 8)
+        return image
     }
 }
 
-private struct DialogActionButton: View {
-    enum Style { case primary, destructive, secondary }
-    let title: String
-    let style: Style
-    let action: () -> Void
-    @State private var isHovered = false
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.body.weight(.medium))
-                .frame(maxWidth: .infinity)
-                .frame(height: 42)
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity)
-        .foregroundStyle(foreground)
-        .background(background, in: Capsule())
-        .contentShape(Capsule())
-        .onHover { isHovered = $0 }
-    }
-
-    private var foreground: Color {
-        switch style {
-        case .primary:
-            return .white
-        case .destructive:
-            return Color(nsColor: .systemRed)
-        case .secondary:
-            return .primary
-        }
-    }
-
-    private var background: Color {
-        switch style {
-        case .primary:
-            return isHovered
-            ? Color.accentColor.opacity(0.82)
-            : .accentColor
-
-        case .destructive, .secondary:
-            return isHovered
-            ? Color.primary.opacity(0.16)
-            : Color.primary.opacity(0.10)
-        }
-    }
-}
 private struct StreamSelector: View {
     let streams: [Stream]
+    let groups: [StreamGroup]
     @Binding var selection: String?
+    let availability: [String: StreamAvailabilityResult]?
+    let checkingURLs: Set<String>
 
     var body: some View {
         ZStack {
-            HStack {
+            HStack(spacing: 8) {
+                if let availability, let stream = streams.first(where: { $0.id == selection }) {
+                    StreamAvailabilityIndicator(result: availability[stream.url], isChecking: checkingURLs.contains(stream.url))
+                }
                 Text(streams.first(where: { $0.id == selection })?.name ?? "Choose a stream")
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer()
                 Image(systemName: "chevron.down")
-                    .font(.headline)
+                    .font(.system(size: 15, weight: .semibold))
+                    .offset(x: ControlMetrics.timeChevronOffset)
+                    .frame(width: ControlMetrics.timeChevronHitWidth, height: ControlMetrics.height)
             }
-            .padding(.horizontal, 12)
-            .frame(width: 420, height: ControlMetrics.height)
+            .padding(.leading, 12)
+            .frame(width: ControlMetrics.streamSelectorWidth, height: ControlMetrics.height)
             .contentShape(Rectangle())
 
-            StreamMenuTrigger(streams: streams, selection: $selection)
-                .frame(width: 420, height: ControlMetrics.height)
+            StreamMenuTrigger(streams: streams, groups: groups, selection: $selection, availability: availability, checkingURLs: checkingURLs)
+                .frame(width: ControlMetrics.streamSelectorWidth, height: ControlMetrics.height)
         }
         .contentShape(RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous))
         .background(.quaternary, in: RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous))
@@ -1635,7 +1661,10 @@ private struct StreamSelector: View {
 }
 private struct StreamMenuTrigger: NSViewRepresentable {
     let streams: [Stream]
+    let groups: [StreamGroup]
     @Binding var selection: String?
+    let availability: [String: StreamAvailabilityResult]?
+    let checkingURLs: Set<String>
 
     func makeNSView(context: Context) -> StreamMenuTriggerView {
         let view = StreamMenuTriggerView()
@@ -1645,35 +1674,176 @@ private struct StreamMenuTrigger: NSViewRepresentable {
 
     func updateNSView(_ view: StreamMenuTriggerView, context: Context) {
         view.streams = streams
+        view.groups = groups
         view.selectedID = selection
+        view.availability = availability
+        view.checkingURLs = checkingURLs
         view.onSelect = { streamID in selection = streamID }
+    }
+}
+
+private struct StreamFilterButton: NSViewRepresentable {
+    @Binding var category: StreamCategory?
+    @Binding var favouritesOnly: Bool
+    @Binding var onlineOnly: Bool
+    let showsOnline: Bool
+
+    func makeNSView(context: Context) -> StreamFilterControl {
+        StreamFilterControl()
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: StreamFilterControl, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 24, height: proposal.height ?? 24)
+    }
+
+    func updateNSView(_ control: StreamFilterControl, context: Context) {
+        control.category = category
+        control.favouritesOnly = favouritesOnly
+        control.onlineOnly = onlineOnly
+        control.showsOnline = showsOnline
+        control.onSelect = { choice in
+            switch choice {
+            case "all":
+                category = nil
+                favouritesOnly = false
+                onlineOnly = false
+            case "favourites": favouritesOnly.toggle()
+            case "online": onlineOnly.toggle()
+            default:
+                if let selected = StreamCategory(rawValue: choice) {
+                    category = category == selected ? nil : selected
+                }
+            }
+        }
+    }
+}
+
+private final class StreamFilterButtonCell: NSButtonCell {
+    override func hitTest(for event: NSEvent, in cellFrame: NSRect, of controlView: NSView) -> NSCell.HitResult {
+        guard isEnabled, cellFrame.contains(controlView.convert(event.locationInWindow, from: nil)) else { return [] }
+        return [.contentArea, .trackableArea]
+    }
+}
+
+private final class StreamFilterControl: NSButton {
+    var category: StreamCategory?
+    var favouritesOnly = false
+    var onlineOnly = false
+    var showsOnline = false
+    var onSelect: ((String) -> Void)?
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
+        cell = StreamFilterButtonCell()
+        title = ""
+        isBordered = false
+        setButtonType(.momentaryChange)
+        target = self
+        action = #selector(openMenu(_:))
+        setAccessibilityLabel("Filter streams")
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 24, height: 24) }
+
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0) }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    func filterMenu() -> NSMenu {
+        let menu = NSMenu()
+        func add(_ title: String, choice: String, selected: Bool) {
+            let item = NSMenuItem(title: title, action: #selector(selectFilter(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = choice
+            item.state = selected ? .on : .off
+            menu.addItem(item)
+        }
+        add("All", choice: "all", selected: category == nil && !favouritesOnly && (!showsOnline || !onlineOnly))
+        menu.addItem(.separator())
+        add("Favourites", choice: "favourites", selected: favouritesOnly)
+        if showsOnline { add("Active", choice: "online", selected: onlineOnly) }
+        menu.addItem(.separator())
+        for option in StreamCategory.allCases {
+            add(option.title, choice: option.rawValue, selected: category == option)
+        }
+        return menu
+    }
+
+    @objc private func openMenu(_ sender: Any?) {
+        let point = NSPoint(x: bounds.minX, y: isFlipped ? bounds.maxY + 4 : bounds.minY - 4)
+        filterMenu().popUp(positioning: nil, at: point, in: self)
+    }
+
+    @objc private func selectFilter(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? String else { return }
+        onSelect?(choice)
     }
 }
 
 private final class StreamMenuTriggerView: NSView {
     var streams: [Stream] = []
+    var groups: [StreamGroup] = []
     var selectedID: String?
     var onSelect: ((String) -> Void)?
+    var checkingURLs: Set<String> = [] {
+        didSet { if let activeMenu { updateAvailability(in: activeMenu) } }
+    }
+    var availability: [String: StreamAvailabilityResult]? {
+        didSet { if let activeMenu { updateAvailability(in: activeMenu) } }
+    }
+    private weak var activeMenu: NSMenu?
+
+    private func updateAvailability(in menu: NSMenu) {
+        for item in menu.items {
+            guard let id = item.representedObject as? String,
+                  let stream = streams.first(where: { $0.id == id }) else { continue }
+            if let availability {
+                let result = availability[stream.url]
+                item.image = checkingURLs.contains(stream.url)
+                    ? StreamAvailabilityIndicator.loadingMenuImage
+                    : (result?.state ?? .unknown).menuImage
+            } else {
+                item.image = nil
+            }
+        }
+    }
+
+    func streamMenu() -> NSMenu {
+        let menu = NSMenu()
+        for section in StreamGrouping.sections(for: streams, groups: groups) {
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            if let title = section.title { menu.addItem(NSMenuItem.sectionHeader(title: title)) }
+            for stream in section.streams {
+                let item = NSMenuItem(title: stream.name, action: #selector(selectStream(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = stream.id
+                item.state = stream.id == selectedID ? .on : .off
+                menu.addItem(item)
+            }
+        }
+        updateAvailability(in: menu)
+        return menu
+    }
 
     override func mouseDown(with event: NSEvent) {
-        let menu = NSMenu()
-        for stream in streams {
-            let item = NSMenuItem(title: stream.name, action: #selector(selectStream(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = stream.id
-            item.state = stream.id == selectedID ? .on : .off
-            menu.addItem(item)
-        }
+        let menu = streamMenu()
+        activeMenu = menu
+        defer { activeMenu = nil }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height), in: self)
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard !streams.isEmpty, event.scrollingDeltaY != 0 else { return }
-        let currentIndex = streams.firstIndex { $0.id == selectedID } ?? 0
+        let orderedStreams = StreamGrouping.sections(for: streams, groups: groups).flatMap(\.streams)
+        guard !orderedStreams.isEmpty, event.scrollingDeltaY != 0 else { return }
+        let currentIndex = orderedStreams.firstIndex { $0.id == selectedID } ?? 0
         let step = event.scrollingDeltaY > 0 ? -1 : 1
-        let nextIndex = min(max(currentIndex + step, 0), streams.count - 1)
+        let nextIndex = min(max(currentIndex + step, 0), orderedStreams.count - 1)
         guard nextIndex != currentIndex else { return }
-        onSelect?(streams[nextIndex].id)
+        onSelect?(orderedStreams[nextIndex].id)
     }
 
     @objc private func selectStream(_ sender: NSMenuItem) {
@@ -1774,24 +1944,19 @@ private struct DateSelector: View {
     let dateFormat: String
     let onCommit: () -> Void
     let showCalendar: () -> Void
-    @FocusState private var isFocused: Bool
+    @State private var isFocused = false
     @State private var isHovered = false
     @State private var isHoveringCalendar = false
 
     var body: some View {
         HStack(spacing: 0) {
-            TextField("", text: $value)
-                .multilineTextAlignment(.center)
-                .textFieldStyle(.plain)
+            DateEntryField(
+                value: $value,
+                dateFormat: dateFormat,
+                onFocusChanged: { isFocused = $0 }
+            )
                 .frame(width: ControlMetrics.dateTimeValueWidth,
                        height: ControlMetrics.height)
-                .focused($isFocused)
-                .onSubmit(onCommit)
-                .onChange(of: value) { _, text in
-                    guard DateFormats.supportsNumericEntry(for: dateFormat) else { return }
-                    let sanitized = DateFormats.sanitizedNumericInput(text, format: dateFormat)
-                    if value != sanitized { value = sanitized }
-                }
 
             Button(action: showCalendar) {
                 Image(systemName: "calendar")
@@ -1827,6 +1992,60 @@ private struct DateSelector: View {
         .onHover { isHovered = $0 }
         .onChange(of: isFocused) { _, focused in
             if !focused { onCommit() }
+        }
+    }
+}
+
+private struct DateEntryField: NSViewRepresentable {
+    @Binding var value: String
+    let dateFormat: String
+    let onFocusChanged: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(value: $value, dateFormat: dateFormat, onFocusChanged: onFocusChanged)
+    }
+
+    func makeNSView(context: Context) -> FocusTrackingTextField {
+        let field = FocusTrackingTextField()
+        field.isBordered = false
+        field.drawsBackground = false
+        field.alignment = .center
+        field.focusRingType = .none
+        field.delegate = context.coordinator
+        field.onFocusChange = context.coordinator.setFocus
+        field.stringValue = value
+        return field
+    }
+
+    func updateNSView(_ field: FocusTrackingTextField, context: Context) {
+        context.coordinator.dateFormat = dateFormat
+        context.coordinator.onFocusChanged = onFocusChanged
+        field.onFocusChange = context.coordinator.setFocus
+        guard !context.coordinator.isNormalizing, field.stringValue != value else { return }
+        field.stringValue = value
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        @Binding private var value: String
+        var dateFormat: String
+        var onFocusChanged: (Bool) -> Void
+        var isNormalizing = false
+
+        init(value: Binding<String>, dateFormat: String, onFocusChanged: @escaping (Bool) -> Void) {
+            _value = value
+            self.dateFormat = dateFormat
+            self.onFocusChanged = onFocusChanged
+        }
+
+        func setFocus(_ focused: Bool) { onFocusChanged(focused) }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            let cleaned = DateFormats.sanitizedNumericInput(field.stringValue, format: dateFormat)
+            isNormalizing = true
+            if field.stringValue != cleaned { field.stringValue = cleaned }
+            value = cleaned
+            isNormalizing = false
         }
     }
 }
@@ -1890,9 +2109,6 @@ private struct TimeSelector: View {
                 .allowsHitTesting(false)
         }
         .onHover { isHovered = $0 }
-        .onChange(of: isFocused) { _, focused in
-            if !focused { onCommit() }
-        }
     }
 }
 
@@ -1925,7 +2141,7 @@ private struct TimeEntryField: NSViewRepresentable {
         context.coordinator.acceptExternalValue(value)
     }
 
-    final class Coordinator: NSObject, NSSearchFieldDelegate {
+    final class Coordinator: NSObject, NSTextFieldDelegate {
         @Binding private var value: String
         @Binding private var isFocused: Bool
         private let onCommit: () -> Void
@@ -1949,14 +2165,6 @@ private struct TimeEntryField: NSViewRepresentable {
             if !focused {
                 onCommit()
             }
-        }
-
-        func controlTextDidBeginEditing(_ notification: Notification) {
-            setFocus(true)
-        }
-
-        func controlTextDidEndEditing(_ notification: Notification) {
-            setFocus(false)
         }
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -2027,10 +2235,6 @@ private struct TimeEntryField: NSViewRepresentable {
                 return true
             }
 
-            let removedText = text.substring(with: affectedCharRange)
-            if !removedText.isEmpty {
-                return true
-            }
             return true
         }
 
@@ -2050,11 +2254,9 @@ private struct TimeEntryField: NSViewRepresentable {
                 return
             }
 
-            let formatted = proposed
-
             isNormalizing = true
-            value = formatted
-            lastAcceptedValue = formatted
+            value = proposed
+            lastAcceptedValue = proposed
             isNormalizing = false
         }
 
@@ -2125,28 +2327,68 @@ private struct TimeEntryField: NSViewRepresentable {
     }
 }
 
-private final class FocusTrackingTextField: NSTextField {
+final class FocusTrackingTextField: NSTextField {
+    var focusPreservationRightInset: CGFloat = 0
+
+    func containsEditingAccessory(at windowPoint: NSPoint) -> Bool {
+        guard focusPreservationRightInset > 0 else { return false }
+        let point = convert(windowPoint, from: nil)
+        return NSRect(x: bounds.minX, y: bounds.minY,
+                      width: bounds.width + focusPreservationRightInset,
+                      height: bounds.height).contains(point)
+    }
     var onFocusChange: ((Bool) -> Void)?
+    private var focusTimer: Timer?
+    private var reportedFocus = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        focusTimer?.invalidate()
+        focusTimer = nil
+        if window != nil {
+            // NSTextField hands keyboard input to the window's shared field editor.
+            // Check its ownership rather than inferring focus from editing events.
+            let timer = Timer(timeInterval: 0.05, target: self,
+                              selector: #selector(refreshFocus), userInfo: nil, repeats: true)
+            RunLoop.main.add(timer, forMode: .common)
+            focusTimer = timer
+        }
+    }
+
+    @objc private func refreshFocus() {
+        let focused: Bool
+        if let window, window.isKeyWindow, let responder = window.firstResponder {
+            focused = responder === self || currentEditor().map { $0 === responder } == true
+        } else {
+            focused = false
+        }
+        guard focused != reportedFocus else { return }
+        reportedFocus = focused
+        onFocusChange?(focused)
+    }
 
     override func resetCursorRects() {
         super.resetCursorRects()
         addCursorRect(bounds, cursor: .iBeam)
     }
 
-    override func becomeFirstResponder() -> Bool {
-        let accepted = super.becomeFirstResponder()
-        if accepted {
-            onFocusChange?(true)
-        }
-        return accepted
-    }
+}
 
-    override func resignFirstResponder() -> Bool {
-        let accepted = super.resignFirstResponder()
-        if accepted {
-            onFocusChange?(false)
+private struct InitialKeyboardFocusReset: NSViewRepresentable {
+    func makeNSView(context: Context) -> ResetView { ResetView() }
+
+    func updateNSView(_ view: ResetView, context: Context) {}
+
+    final class ResetView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            window.initialFirstResponder = nil
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window, self.window === window else { return }
+                window.makeFirstResponder(nil)
+            }
         }
-        return accepted
     }
 }
 
@@ -2240,41 +2482,76 @@ private struct DigitsOnlyNumberField: View {
     @Binding var value: Int
     let range: ClosedRange<Int>
     let onFocusChanged: (Bool) -> Void
-    @State private var text = ""
-    @FocusState private var isFocused: Bool
-
-    private var maximumDigits: Int {
-        String(range.upperBound).count
-    }
+    @State private var isFocused = false
 
     var body: some View {
-        TextField("", text: $text)
-            .multilineTextAlignment(.center)
-            .textFieldStyle(.plain)
-            .monospacedDigit()
-            .focused($isFocused)
-            .onAppear { text = String(value) }
-            .onChange(of: text) { _, newText in
-                let digits = String(newText.filter(\.isNumber).prefix(maximumDigits))
-                if text != digits {
-                    text = digits
-                    return
-                }
-                guard let enteredValue = Int(digits) else { return }
-                let clampedValue = min(max(enteredValue, range.lowerBound), range.upperBound)
-                if enteredValue != clampedValue {
-                    text = String(clampedValue)
-                }
-                value = clampedValue
-            }
-            .onChange(of: value) { _, newValue in
-                let formatted = String(newValue)
-                if text != formatted { text = formatted }
-            }
+        NumberEntryField(value: $value, range: range, onFocusChanged: { isFocused = $0 })
             .onChange(of: isFocused) { _, focused in
                 onFocusChanged(focused)
-                if !focused { text = String(value) }
             }
+    }
+}
+
+private struct NumberEntryField: NSViewRepresentable {
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    let onFocusChanged: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(value: $value, range: range, onFocusChanged: onFocusChanged)
+    }
+
+    func makeNSView(context: Context) -> FocusTrackingTextField {
+        let field = FocusTrackingTextField()
+        field.isBordered = false
+        field.drawsBackground = false
+        field.alignment = .center
+        field.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        field.focusPreservationRightInset = ControlMetrics.durationAccessoryWidth
+        field.focusRingType = .none
+        field.delegate = context.coordinator
+        field.onFocusChange = context.coordinator.setFocus
+        field.stringValue = String(value)
+        return field
+    }
+
+    func updateNSView(_ field: FocusTrackingTextField, context: Context) {
+        context.coordinator.range = range
+        context.coordinator.onFocusChanged = onFocusChanged
+        field.onFocusChange = context.coordinator.setFocus
+        guard !context.coordinator.isEditing, field.stringValue != String(value) else { return }
+        field.stringValue = String(value)
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        @Binding private var value: Int
+        var range: ClosedRange<Int>
+        var onFocusChanged: (Bool) -> Void
+        var isEditing = false
+
+        init(value: Binding<Int>, range: ClosedRange<Int>, onFocusChanged: @escaping (Bool) -> Void) {
+            _value = value
+            self.range = range
+            self.onFocusChanged = onFocusChanged
+        }
+
+        func setFocus(_ focused: Bool) { onFocusChanged(focused) }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            let digits = String(field.stringValue.filter(\.isNumber).prefix(String(range.upperBound).count))
+            isEditing = true
+            if field.stringValue != digits { field.stringValue = digits }
+            if let entered = Int(digits) {
+                value = min(max(entered, range.lowerBound), range.upperBound)
+            }
+            isEditing = false
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            field.stringValue = String(value)
+        }
     }
 }
 
@@ -2324,33 +2601,44 @@ private struct PersistentListScroller: NSViewRepresentable {
         self.onConfigured = onConfigured
     }
 
+    final class Coordinator {
+        weak var scrollView: NSScrollView?
+        var needsScroller: Bool?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> ScrollViewConfigurationView {
         let view = ScrollViewConfigurationView()
         view.configure = { hostView in
-            configureScrollView(containing: hostView)
+            configureScrollView(containing: hostView, coordinator: context.coordinator)
         }
         return view
     }
 
     func updateNSView(_ view: ScrollViewConfigurationView, context: Context) {
         view.configure = { hostView in
-            configureScrollView(containing: hostView)
+            configureScrollView(containing: hostView, coordinator: context.coordinator)
         }
         view.configureNow()
     }
 
-    private func configureScrollView(containing view: NSView) {
+    private func configureScrollView(containing view: NSView, coordinator: Coordinator) {
         var candidate: NSView? = view
         while let current = candidate {
             if let scrollView = findScrollView(in: current) {
-                scrollView.scrollerStyle = scrollerStyle
+                if scrollView.scrollerStyle != scrollerStyle { scrollView.scrollerStyle = scrollerStyle }
                 let needsVerticalScroller = (scrollView.documentView?.frame.height ?? 0)
                     > scrollView.contentView.bounds.height
-                scrollView.hasVerticalScroller = needsVerticalScroller
-                scrollView.autohidesScrollers = false
-                scrollView.verticalScroller?.isHidden = !needsVerticalScroller
-                DispatchQueue.main.async {
-                    onConfigured(needsVerticalScroller)
+                if scrollView.hasVerticalScroller != needsVerticalScroller { scrollView.hasVerticalScroller = needsVerticalScroller }
+                if scrollView.autohidesScrollers { scrollView.autohidesScrollers = false }
+                if scrollView.verticalScroller?.isHidden != !needsVerticalScroller {
+                    scrollView.verticalScroller?.isHidden = !needsVerticalScroller
+                }
+                if coordinator.scrollView !== scrollView || coordinator.needsScroller != needsVerticalScroller {
+                    coordinator.scrollView = scrollView
+                    coordinator.needsScroller = needsVerticalScroller
+                    DispatchQueue.main.async { onConfigured(needsVerticalScroller) }
                 }
                 return
             }
@@ -2440,26 +2728,607 @@ private struct ManageStreamsSearchField: NSViewRepresentable {
 }
 
 
-struct StreamManagementView: View {
-    private enum FocusTarget: Hashable {
-        case streamList
-        case search
+private struct StreamOrganisationDrag: Codable, Sendable {
+    enum Content: Codable, Sendable {
+        case streams([String])
+        case group(UUID)
+    }
+    static let pasteboardType = NSPasteboard.PasteboardType("uk.co.bbcd4.stream-organisation")
+    let sessionID: UUID
+    let content: Content
+
+    static func decode(_ data: Data, sessionID: UUID) -> Self? {
+        guard let payload = try? JSONDecoder().decode(Self.self, from: data), payload.sessionID == sessionID else { return nil }
+        return payload
+    }
+}
+
+private enum StreamOrganisationRow: Hashable {
+    enum Key: Hashable {
+        case group(UUID), ungrouped, stream(String)
+    }
+    case group(StreamGroup, count: Int, collapsed: Bool)
+    case ungrouped(Int)
+    case stream(Stream)
+
+    var key: Key {
+        switch self {
+        case .group(let group, _, _): .group(group.id)
+        case .ungrouped: .ungrouped
+        case .stream(let stream): .stream(stream.id)
+        }
+    }
+    var stream: Stream? { if case .stream(let stream) = self { stream } else { nil } }
+    var groupID: UUID? {
+        switch self {
+        case .group(let group, _, _): group.id
+        case .stream(let stream): stream.groupID
+        case .ungrouped: nil
+        }
+    }
+    var title: String {
+        switch self {
+        case .group(let group, _, _): group.name
+        case .ungrouped: "Ungrouped"
+        case .stream(let stream): stream.name
+        }
+    }
+}
+
+private struct StreamOrganisationDrop {
+    let payload: StreamOrganisationDrag
+    let groupID: UUID?
+    let anchor: String?
+    let after: Bool
+    let indicatorRow: Int
+    let operation: NSTableView.DropOperation
+
+    static func resolve(payload: StreamOrganisationDrag, rows: [StreamOrganisationRow], row: Int, lowerHalf: Bool) -> Self? {
+        guard row >= 0 else { return nil }
+        let target = rows.indices.contains(row) ? rows[row] : nil
+        switch payload.content {
+        case .streams(let ids):
+            guard !ids.isEmpty else { return nil }
+            if let stream = target?.stream {
+                guard !ids.contains(stream.id) else { return nil }
+                return Self(payload: payload, groupID: stream.groupID, anchor: stream.id, after: lowerHalf,
+                            indicatorRow: row + (lowerHalf ? 1 : 0), operation: .above)
+            }
+            return Self(payload: payload, groupID: target?.groupID, anchor: nil, after: false,
+                        indicatorRow: min(row, rows.count), operation: target == nil ? .above : .on)
+        case .group(let id):
+            guard rows.contains(where: { if case .group(let group, _, _) = $0 { return group.id == id }; return false }) else { return nil }
+            let targetID = target?.groupID
+            guard id != targetID else { return nil }
+            if let targetID, let header = rows.firstIndex(where: {
+                if case .group(let group, _, _) = $0 { return group.id == targetID }; return false
+            }) {
+                let after = target?.stream != nil || lowerHalf
+                let boundary = after
+                    ? (rows[(header + 1)...].firstIndex(where: { $0.stream == nil }) ?? rows.count)
+                    : header
+                return Self(payload: payload, groupID: targetID, anchor: nil, after: after,
+                            indicatorRow: boundary, operation: .above)
+            }
+            let boundary = rows.firstIndex(where: { if case .ungrouped = $0 { return true }; return false }) ?? rows.count
+            return Self(payload: payload, groupID: nil, anchor: nil, after: false, indicatorRow: boundary, operation: .above)
+        }
+    }
+}
+
+private final class StreamListMenuItem: NSMenuItem {
+    private let invoke: () -> Void
+    init(_ title: String, enabled: Bool = true, selected: Bool = false, action: @escaping () -> Void) {
+        invoke = action
+        super.init(title: title, action: #selector(choose), keyEquivalent: "")
+        target = self
+        isEnabled = enabled
+        state = selected ? .on : .off
+    }
+    required init(coder: NSCoder) {
+        invoke = {}
+        super.init(coder: coder)
+    }
+    @objc private func choose() { invoke() }
+}
+
+private struct StreamOrganisationList: NSViewRepresentable {
+    let rows: [StreamOrganisationRow]
+    @Binding var selection: Set<String>
+    let editingGroupID: UUID?
+    let editingGroupName: String
+    let availability: [String: StreamAvailabilityResult]
+    let checkingURLs: Set<String>
+    let showsStatus: Bool
+    let sessionID: UUID
+    let onToggleGroup: (UUID) -> Void
+    let onNameChange: (UUID, String) -> Void
+    let onNameCommit: (UUID, String) -> Void
+    let onNameCancel: (UUID) -> Void
+    let onDelete: (Set<String>) -> Void
+    let onMenu: (StreamOrganisationRow, Set<String>) -> NSMenu
+    let onMove: (StreamOrganisationDrop) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .legacy
+        let table = StreamOrganisationTable()
+        table.headerView = nil
+        table.style = .inset
+        table.backgroundColor = .clear
+        table.rowSizeStyle = .custom
+        table.rowHeight = 26
+        table.intercellSpacing = .zero
+        table.draggingDestinationFeedbackStyle = .regular
+        table.allowsExpansionToolTips = false
+        table.allowsMultipleSelection = true
+        table.allowsEmptySelection = true
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("streams"))
+        column.resizingMask = .autoresizingMask
+        column.width = 480
+        table.addTableColumn(column)
+        table.dataSource = context.coordinator
+        table.delegate = context.coordinator
+        table.registerForDraggedTypes([StreamOrganisationDrag.pasteboardType])
+        table.coordinator = context.coordinator
+        table.autoresizingMask = [.width]
+        scroll.documentView = table
+        context.coordinator.table = table
+        context.coordinator.update(self)
+        return scroll
     }
 
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.update(self)
+    }
+
+    @MainActor final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+        var parent: StreamOrganisationList
+        weak var table: StreamOrganisationTable?
+        var rows: [StreamOrganisationRow] = []
+        private var synchronising = false
+        private var lastEditingID: UUID?
+        private var dragCache: (sequence: Int, payload: StreamOrganisationDrag)?
+
+        init(_ parent: StreamOrganisationList) { self.parent = parent }
+
+        func update(_ parent: StreamOrganisationList) {
+            let previousEditingID = self.parent.editingGroupID
+            self.parent = parent
+            guard let table else { return }
+            if let previousEditingID, previousEditingID != parent.editingGroupID,
+               let row = rows.firstIndex(where: { $0.groupID == previousEditingID && $0.stream == nil }),
+               let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? StreamOrganisationCell,
+               cell.nameField.currentEditor() != nil {
+                table.window?.makeFirstResponder(table)
+            }
+            synchronising = true
+            let oldKeys = rows.map(\.key)
+            rows = parent.rows
+            if oldKeys != rows.map(\.key) { table.reloadData() }
+            else {
+                for row in table.rows(in: table.visibleRect).location..<(NSMaxRange(table.rows(in: table.visibleRect))) where rows.indices.contains(row) {
+                    if let cell = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? StreamOrganisationCell { configure(cell, row: row) }
+                }
+            }
+            let selected = IndexSet(rows.indices.filter { rows[$0].stream.map { parent.selection.contains($0.id) } ?? false })
+            if table.selectedRowIndexes != selected { table.selectRowIndexes(selected, byExtendingSelection: false) }
+            synchronising = false
+            if let id = parent.editingGroupID, id != lastEditingID {
+                lastEditingID = id
+                DispatchQueue.main.async { [weak self] in self?.focusName(id) }
+            } else if parent.editingGroupID == nil { lastEditingID = nil }
+        }
+
+        func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { rows.indices.contains(row) && rows[row].stream != nil }
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            let id = NSUserInterfaceItemIdentifier("stream-row")
+            let cell = tableView.makeView(withIdentifier: id, owner: self) as? StreamOrganisationCell ?? StreamOrganisationCell()
+            cell.identifier = id
+            cell.nameField.delegate = self
+            configure(cell, row: row)
+            return cell
+        }
+        private func configure(_ cell: StreamOrganisationCell, row: Int) {
+            guard rows.indices.contains(row) else { return }
+            cell.configure(rows[row], editingID: parent.editingGroupID, editingName: parent.editingGroupName,
+                           status: rows[row].stream.flatMap { parent.availability[$0.url] },
+                           checking: rows[row].stream.map { parent.checkingURLs.contains($0.url) } ?? false,
+                           showsStatus: parent.showsStatus)
+        }
+
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard !synchronising, let table else { return }
+            parent.selection = selectedIDs(table)
+        }
+        func selectedIDs(_ table: NSTableView) -> Set<String> {
+            Set(table.selectedRowIndexes.compactMap { rows.indices.contains($0) ? rows[$0].stream?.id : nil })
+        }
+        func focusName(_ id: UUID) {
+            guard parent.editingGroupID == id, let table,
+                  let row = rows.firstIndex(where: { $0.groupID == id && $0.stream == nil }) else { return }
+            table.scrollRowToVisible(row)
+            guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? StreamOrganisationCell else { return }
+            configure(cell, row: row)
+            if cell.nameField.currentEditor() == nil { table.window?.makeFirstResponder(cell.nameField) }
+            cell.nameField.currentEditor()?.selectedRange = NSRange(location: 0, length: cell.nameField.stringValue.utf16.count)
+        }
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? StreamGroupNameField, let id = field.groupID else { return }
+            parent.onNameChange(id, field.currentEditor()?.string ?? field.stringValue)
+        }
+        func controlTextDidEndEditing(_ notification: Notification) {
+            guard let field = notification.object as? StreamGroupNameField, let id = field.groupID, parent.editingGroupID == id else { return }
+            parent.onNameCommit(id, field.currentEditor()?.string ?? field.stringValue)
+        }
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            guard let field = control as? StreamGroupNameField, let id = field.groupID else { return false }
+            if selector == #selector(NSResponder.insertNewline(_:)) {
+                parent.onNameCommit(id, textView.string)
+                table?.window?.makeFirstResponder(table)
+                return true
+            }
+            if selector == #selector(NSResponder.cancelOperation(_:)) {
+                parent.onNameCancel(id)
+                table?.window?.makeFirstResponder(table)
+                return true
+            }
+            return false
+        }
+
+        func payload(_ info: NSDraggingInfo) -> StreamOrganisationDrag? {
+            if let dragCache, dragCache.sequence == info.draggingSequenceNumber { return dragCache.payload }
+            guard let data = info.draggingPasteboard.data(forType: StreamOrganisationDrag.pasteboardType),
+                  let payload = StreamOrganisationDrag.decode(data, sessionID: parent.sessionID) else { return nil }
+            dragCache = (info.draggingSequenceNumber, payload)
+            return payload
+        }
+        func drop(_ info: NSDraggingInfo, proposedRow row: Int) -> StreamOrganisationDrop? {
+            guard let table, let payload = payload(info) else { return nil }
+            let point = table.convert(info.draggingLocation, from: nil)
+            let lower = rows.indices.contains(row) && point.y >= table.rect(ofRow: row).midY
+            return StreamOrganisationDrop.resolve(payload: payload, rows: rows, row: row, lowerHalf: lower)
+        }
+        func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation operation: NSTableView.DropOperation) -> NSDragOperation {
+            guard let drop = drop(info, proposedRow: row) else { return [] }
+            tableView.setDropRow(drop.indicatorRow, dropOperation: drop.operation)
+            return .move
+        }
+        func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation operation: NSTableView.DropOperation) -> Bool {
+            // AppKit passes the adjusted indicator row here; retain the pointer's actual target.
+            let pointer = tableView.convert(info.draggingLocation, from: nil)
+            let hit = tableView.row(at: pointer)
+            let target = hit >= 0 ? hit : rows.count
+            guard let drop = drop(info, proposedRow: target) else { return false }
+            parent.onMove(drop)
+            dragCache = nil
+            return true
+        }
+    }
+}
+
+private final class StreamGroupNameField: NSTextField {
+    var groupID: UUID?
+}
+
+private final class StreamOrganisationCell: NSTableCellView {
+    private struct Presentation: Equatable {
+        let row: StreamOrganisationRow
+        let editingID: UUID?
+        let editingName: String
+        let status: String?
+        let checking: Bool
+        let showsStatus: Bool
+    }
+    private var presentation: Presentation?
+    let nameField = StreamGroupNameField(frame: .zero)
+    private let leading = NSImageView()
+    private let disclosure = NSButton()
+    private let spinner = NSProgressIndicator()
+    private let favourite = NSImageView()
+    private let typeIcon = NSImageView()
+    private let count = NSTextField(labelWithString: "")
+    private let metadata = NSStackView()
+    private var leadingInset: NSLayoutConstraint!
+    private var leadingWidth: NSLayoutConstraint!
+    private var nameGap: NSLayoutConstraint!
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        for view in [leading, disclosure, spinner, nameField, metadata] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        nameField.lineBreakMode = .byTruncatingTail
+        nameField.isBezeled = false
+        nameField.drawsBackground = false
+        nameField.isEnabled = true
+        nameField.usesSingleLineMode = true
+        nameField.allowsExpansionToolTips = false
+        nameField.cell?.isScrollable = true
+        nameField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        nameField.focusRingType = .none
+        textField = nameField
+        metadata.orientation = .horizontal
+        metadata.distribution = .fill
+        metadata.spacing = 4
+        metadata.detachesHiddenViews = true
+        metadata.setHuggingPriority(.required, for: .horizontal)
+        for view in [favourite, typeIcon, count] { metadata.addArrangedSubview(view) }
+        disclosure.setButtonType(.momentaryPushIn)
+        disclosure.isBordered = false
+        disclosure.imagePosition = .imageOnly
+        disclosure.imageScaling = .scaleNone
+        disclosure.contentTintColor = .secondaryLabelColor
+        disclosure.title = ""
+        disclosure.controlSize = .small
+        disclosure.refusesFirstResponder = true
+        disclosure.target = self
+        disclosure.action = #selector(toggleGroup)
+        favourite.image = NSImage(systemSymbolName: "star.fill", accessibilityDescription: "Favourite")
+        for icon in [favourite, typeIcon] {
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            icon.imageScaling = .scaleProportionallyDown
+            NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: 18), icon.heightAnchor.constraint(equalToConstant: 18)])
+        }
+        spinner.style = .spinning
+        spinner.controlSize = .mini
+        spinner.isDisplayedWhenStopped = false
+        count.font = .systemFont(ofSize: 11)
+        count.setContentCompressionResistancePriority(.required, for: .horizontal)
+        count.setContentHuggingPriority(.required, for: .horizontal)
+        leadingInset = leading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4)
+        leadingWidth = leading.widthAnchor.constraint(equalToConstant: 8)
+        nameGap = nameField.leadingAnchor.constraint(equalTo: leading.trailingAnchor, constant: 8)
+        NSLayoutConstraint.activate([
+            leadingInset, leadingWidth, nameGap,
+            leading.heightAnchor.constraint(equalToConstant: 12), leading.centerYAnchor.constraint(equalTo: centerYAnchor),
+            disclosure.widthAnchor.constraint(equalToConstant: 13), disclosure.heightAnchor.constraint(equalToConstant: 13),
+            disclosure.centerXAnchor.constraint(equalTo: leading.centerXAnchor), disclosure.centerYAnchor.constraint(equalTo: centerYAnchor),
+            spinner.widthAnchor.constraint(equalToConstant: 10), spinner.heightAnchor.constraint(equalToConstant: 10),
+            spinner.centerXAnchor.constraint(equalTo: leading.centerXAnchor), spinner.centerYAnchor.constraint(equalTo: leading.centerYAnchor),
+            nameField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            nameField.trailingAnchor.constraint(equalTo: metadata.leadingAnchor, constant: -8),
+            metadata.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            metadata.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+    required init?(coder: NSCoder) { nil }
+
+    func configure(_ row: StreamOrganisationRow, editingID: UUID?, editingName: String, status: StreamAvailabilityResult?, checking: Bool, showsStatus: Bool) {
+        let updated = Presentation(row: row, editingID: editingID, editingName: row.stream == nil ? editingName : "",
+                                   status: status?.state.title, checking: checking, showsStatus: showsStatus)
+        guard presentation != updated else { return }
+        presentation = updated
+        let editing = row.stream == nil && row.groupID != nil && row.groupID == editingID
+        let title = editing ? editingName : row.title
+        if nameField.currentEditor() == nil && nameField.stringValue != title { nameField.stringValue = title }
+        nameField.groupID = row.stream == nil ? row.groupID : nil
+        if nameField.isEditable != editing { nameField.isEditable = editing }
+        if nameField.isSelectable != editing { nameField.isSelectable = editing }
+        nameField.font = .systemFont(ofSize: 13, weight: row.stream == nil ? .semibold : .regular)
+        leadingInset.constant = row.stream?.groupID == nil ? 4 : 22
+        leading.isHidden = false
+        disclosure.isHidden = true
+        spinner.stopAnimation(nil)
+        favourite.isHidden = true
+        typeIcon.isHidden = true
+        count.isHidden = true
+        switch row {
+        case .group(_, let members, let collapsed):
+            leadingWidth.constant = 13
+            nameGap.constant = 8
+            leading.isHidden = true
+            disclosure.isHidden = false
+            disclosure.image = NSImage(systemSymbolName: collapsed ? "chevron.right" : "chevron.down", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 11, weight: .bold))
+            disclosure.setAccessibilityValue(collapsed ? "Collapsed" : "Expanded")
+            disclosure.setAccessibilityLabel(row.title)
+            count.stringValue = "\(members)"
+            count.isHidden = false
+        case .ungrouped(let members):
+            leadingWidth.constant = 0
+            nameGap.constant = 0
+            leading.image = nil
+            count.stringValue = "\(members)"
+            count.isHidden = false
+        case .stream(let stream):
+            leadingWidth.constant = showsStatus ? 8 : 0
+            nameGap.constant = showsStatus ? 8 : 0
+            leading.image = showsStatus ? Self.dot : nil
+            leading.isHidden = checking || !showsStatus
+            leading.contentTintColor = status?.state == .online ? .systemGreen : status?.state == .offline ? .systemRed : .secondaryLabelColor
+            if checking && showsStatus { spinner.startAnimation(nil) }
+            favourite.isHidden = !stream.isFavourite
+            typeIcon.isHidden = false
+            typeIcon.image = NSImage(systemSymbolName: stream.category.iconName, accessibilityDescription: stream.category.title)
+        }
+        updateColours()
+    }
+    private static let dot: NSImage = {
+        let image = NSImage(size: NSSize(width: 8, height: 8), flipped: false) { bounds in
+            NSColor.white.setFill()
+            NSBezierPath(ovalIn: bounds).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+    override var backgroundStyle: NSView.BackgroundStyle { didSet { updateColours() } }
+    private func updateColours() {
+        let selected = backgroundStyle == .emphasized
+        nameField.textColor = selected ? .selectedMenuItemTextColor : .labelColor
+        count.textColor = selected ? .selectedMenuItemTextColor : .secondaryLabelColor
+        favourite.contentTintColor = selected ? .selectedMenuItemTextColor : .labelColor
+        typeIcon.contentTintColor = selected ? .selectedMenuItemTextColor : .labelColor
+    }
+
+    private var table: StreamOrganisationTable? { enclosingScrollView?.documentView as? StreamOrganisationTable }
+    @objc private func toggleGroup() {
+        guard let id = presentation?.row.groupID else { return }
+        table?.coordinator?.parent.onToggleGroup(id)
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        if !disclosure.isHidden, disclosure.frame.contains(local) { return super.hitTest(point) }
+        if nameField.isEditable, nameField.frame.contains(local) { return super.hitTest(point) }
+        return self
+    }
+    override func mouseDown(with event: NSEvent) { table?.mouseDown(with: event) }
+    override func mouseDragged(with event: NSEvent) { table?.mouseDragged(with: event) }
+    override func mouseUp(with event: NSEvent) { table?.mouseUp(with: event) }
+    override func rightMouseDown(with event: NSEvent) { table?.rightMouseDown(with: event) }
+}
+
+private final class StreamOrganisationTable: NSTableView {
+    weak var coordinator: StreamOrganisationList.Coordinator?
+    private var pressedRow: StreamOrganisationRow.Key?
+    private var pressLocation = NSPoint.zero
+    private var collapseSelectionOnRelease = false
+    private var anchor: StreamOrganisationRow.Key?
+    private var dragging = false
+
+    override func mouseDown(with event: NSEvent) {
+        guard let coordinator else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let index = row(at: point)
+        guard coordinator.rows.indices.contains(index) else {
+            if event.modifierFlags.intersection([.command, .shift]).isEmpty { deselectAll(nil) }
+            pressedRow = nil
+            return
+        }
+        window?.makeFirstResponder(self)
+        let item = coordinator.rows[index]
+        pressedRow = item.key
+        pressLocation = point
+        dragging = false
+        collapseSelectionOnRelease = false
+        guard item.stream != nil else {
+            if event.modifierFlags.intersection([.command, .shift]).isEmpty { deselectAll(nil) }
+            return
+        }
+        let modifiers = event.modifierFlags.intersection([.command, .shift])
+        if modifiers.contains(.shift) {
+            let start = anchor.flatMap { key in coordinator.rows.firstIndex { $0.key == key } } ?? index
+            let range = IndexSet((min(start, index)...max(start, index)).filter { coordinator.rows[$0].stream != nil })
+            selectRowIndexes(range, byExtendingSelection: modifiers.contains(.command))
+        } else if modifiers.contains(.command) {
+            if isRowSelected(index) { deselectRow(index) }
+            else { selectRowIndexes(IndexSet(integer: index), byExtendingSelection: true) }
+            anchor = item.key
+        } else if isRowSelected(index) {
+            collapseSelectionOnRelease = selectedRowIndexes.count > 1
+            anchor = item.key
+        } else {
+            selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            anchor = item.key
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !dragging, let coordinator, let key = pressedRow,
+              let row = coordinator.rows.firstIndex(where: { $0.key == key }) else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard hypot(point.x - pressLocation.x, point.y - pressLocation.y) >= 3 else { return }
+        let content: StreamOrganisationDrag.Content
+        switch coordinator.rows[row] {
+        case .group(let group, _, _): content = .group(group.id)
+        case .stream(let stream):
+            let selected = coordinator.selectedIDs(self)
+            guard selected.contains(stream.id) else { return }
+            let ids = coordinator.rows.compactMap { $0.stream }.filter { selected.contains($0.id) }.map(\.id)
+            guard !ids.isEmpty else { return }
+            content = .streams(ids)
+        case .ungrouped: return
+        }
+        guard window?.isVisible == true else { return }
+        let payload = StreamOrganisationDrag(sessionID: coordinator.parent.sessionID, content: content)
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        let writer = NSPasteboardItem()
+        writer.setData(data, forType: StreamOrganisationDrag.pasteboardType)
+        let item = NSDraggingItem(pasteboardWriter: writer)
+        let title: String
+        if case .streams(let ids) = content, ids.count > 1 { title = "\(ids.count) streams" }
+        else { title = coordinator.rows[row].title }
+        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.white]
+        let size = NSSize(width: min(300, (title as NSString).size(withAttributes: attributes).width + 24), height: 28)
+        let image = NSImage(size: size, flipped: false) { bounds in
+            NSColor.controlAccentColor.setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
+            (title as NSString).draw(in: bounds.insetBy(dx: 12, dy: 5), withAttributes: attributes)
+            return true
+        }
+        item.setDraggingFrame(NSRect(x: point.x - 12, y: point.y - 14, width: size.width, height: size.height), contents: image)
+        dragging = true
+        beginDraggingSession(with: [item], event: event, source: self)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { pressedRow = nil; collapseSelectionOnRelease = false }
+        guard !dragging, let coordinator, let key = pressedRow,
+              let index = coordinator.rows.firstIndex(where: { $0.key == key }) else { return }
+        if collapseSelectionOnRelease { selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+        if case .group(let group, _, _) = coordinator.rows[index],
+           event.modifierFlags.intersection([.command, .shift]).isEmpty {
+            coordinator.parent.onToggleGroup(group.id)
+        }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard let coordinator else { return }
+        let index = row(at: convert(event.locationInWindow, from: nil))
+        guard coordinator.rows.indices.contains(index) else { return }
+        if coordinator.rows[index].stream != nil, !isRowSelected(index) {
+            selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        }
+        let menu = coordinator.parent.onMenu(coordinator.rows[index], coordinator.selectedIDs(self))
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+    override func keyDown(with event: NSEvent) {
+        if [51, 117].contains(event.keyCode), let coordinator {
+            coordinator.parent.onDelete(coordinator.selectedIDs(self))
+        } else { super.keyDown(with: event) }
+    }
+    override func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { context == .withinApplication ? .move : [] }
+    override func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
+    override func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        dragging = false
+        pressedRow = nil
+    }
+}
+
+struct StreamManagementView: View {
     @EnvironmentObject private var streamStore: StreamStore
+    @EnvironmentObject private var streamAvailability: StreamAvailabilityMonitor
+    @AppStorage(StreamAvailabilityPreferences.enabledKey) private var checkStreamAvailability = StreamAvailabilityPreferences.defaultEnabled
+    @AppStorage(StreamAvailabilityPreferences.startInAppKey) private var showStreamCheckStartInAppNotification = true
+    @State private var streamCheckNotification: StreamStatusCheckStarted?
 
     @State private var showingAddStream = false
+    @State private var collapsedGroupIDs: Set<UUID> = []
+    @State private var editingGroupID: UUID?
+    @State private var editingGroupName = ""
+    @State private var groupToDelete: StreamGroup?
+    @State private var dragSessionID = UUID()
+    @State private var groupError: String?
     @State private var showingEditStream = false
     @State private var showingDeleteConfirmation = false
+    @State private var pendingDeletionIDs: Set<String> = []
+    @State private var selectedStreamIDs: Set<String> = []
     @State private var showingResetConfirmation = false
     @State private var searchText = ""
     @State private var categoryFilter: StreamCategory?
     @State private var favouritesOnly = false
-    @State private var isStreamListReady = false
-    @State private var listNeedsScrollbar = true
+    @State private var onlineOnly = false
     @AppStorage("skipDeleteConfirmation") private var skipDeleteConfirmation = false
     @AppStorage("activeStreamCategoryFilter") private var activeStreamCategoryFilter = ""
     @AppStorage("activeFavouritesOnly") private var activeFavouritesOnly = false
+    @AppStorage(StreamAvailabilityPreferences.activeOnlineOnlyKey) private var activeOnlineOnly = false
     @AppStorage(AppKeybinding.editSelectedItem.rawValue) private var editSelectedItemKey = AppKeybinding.editSelectedItem.defaultShortcut.storedValue
     @AppStorage(AppKeybinding.toggleFavourite.rawValue) private var toggleFavouriteKey = AppKeybinding.toggleFavourite.defaultShortcut.storedValue
     @AppStorage(AppKeybinding.setTelevision.rawValue) private var setTelevisionKey = AppKeybinding.setTelevision.defaultShortcut.storedValue
@@ -2470,62 +3339,106 @@ struct StreamManagementView: View {
     @AppStorage(AppKeybinding.setTelevision.enabledStorageKey) private var setTelevisionShortcutEnabled = true
     @AppStorage(AppKeybinding.setRadio.enabledStorageKey) private var setRadioShortcutEnabled = true
     @AppStorage(AppKeybinding.setLiveStream.enabledStorageKey) private var setLiveStreamShortcutEnabled = true
-    @FocusState private var focusedTarget: FocusTarget?
     @State private var shortcutEventMonitor: Any?
 
-    private var filteredStreams: [Stream] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        return streamStore.streams.filter { stream in
-            (categoryFilter == nil || stream.category == categoryFilter)
-                && (!favouritesOnly || stream.isFavourite)
-                && (query.isEmpty || stream.name.localizedCaseInsensitiveContains(query))
+    private var canCheckStreamStatus: Bool {
+        checkStreamAvailability && !streamAvailability.isChecking && !streamStore.streams.isEmpty
+    }
+
+    private var checkStreamStatusButton: some View {
+        Button {
+            streamAvailability.requestRefresh()
+        } label: {
+            ZStack {
+                if streamAvailability.isChecking {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .resizable()
+                        .scaledToFit()
+                }
+            }
+            .frame(width: 18, height: 18)
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .disabled(!canCheckStreamStatus)
+        .buttonCursor(isEnabled: canCheckStreamStatus)
+        .accessibilityLabel("Check stream status")
+        .hoverHint("Check stream status", alignment: .topTrailing, below: true)
     }
 
+    private var streamFilterMenu: some View {
+        StreamFilterButton(category: $categoryFilter, favouritesOnly: $favouritesOnly, onlineOnly: $onlineOnly, showsOnline: checkStreamAvailability)
+        .frame(width: 24, height: 24)
+        .overlay {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 18, height: 18)
+                .allowsHitTesting(false)
+        }
+        .hoverHint("Filter streams", alignment: .topTrailing, below: true)
+        .zIndex(1)
+    }
 
-    private var allStreamsFilterBinding: Binding<Bool> {
-        Binding(
-            get: { categoryFilter == nil && !favouritesOnly },
-            set: { isAllStreams in
-                guard isAllStreams else { return }
-                categoryFilter = nil
-                favouritesOnly = false
-            }
+    private var streamFilter: StreamListFilter {
+        StreamListFilter(
+            category: categoryFilter,
+            favouritesOnly: favouritesOnly,
+            onlineOnly: checkStreamAvailability && onlineOnly
         )
     }
 
-    private func categoryFilterBinding(for category: StreamCategory) -> Binding<Bool> {
-        Binding(
-            get: { categoryFilter == category },
-            set: { isSelected in
-                categoryFilter = isSelected ? category : nil
+    private var streamSections: [StreamGroupSection] {
+        let eligible = streamStore.streams.filter {
+            streamFilter.matches($0, availability: streamAvailability.results[$0.url]?.state)
+        }
+        return StreamGrouping.searchSections(for: eligible, groups: streamStore.groups, query: searchText)
+    }
+    private var filteredStreams: [Stream] { streamSections.flatMap(\.streams) }
+
+    private var visibleStreams: [Stream] {
+        streamSections.filter { section in
+            section.id.map { !collapsedGroupIDs.contains($0) } ?? true
+        }.flatMap(\.streams)
+    }
+
+    private var organisationRows: [StreamOrganisationRow] {
+        streamSections.flatMap { section -> [StreamOrganisationRow] in
+            if let id = section.id, let group = streamStore.groups.first(where: { $0.id == id }) {
+                let header = StreamOrganisationRow.group(group, count: section.streams.count, collapsed: collapsedGroupIDs.contains(id))
+                return [header] + (collapsedGroupIDs.contains(id) ? [] : section.streams.map(StreamOrganisationRow.stream))
             }
-        )
+            return (section.title == nil ? [] : [.ungrouped(section.streams.count)]) + section.streams.map(StreamOrganisationRow.stream)
+        }
     }
 
     private func applyActiveFilter() {
         favouritesOnly = activeFavouritesOnly
+        onlineOnly = activeOnlineOnly
         categoryFilter = StreamCategory.allCases.first { $0.title == activeStreamCategoryFilter }
     }
 
     private func saveActiveFilter() {
         activeFavouritesOnly = favouritesOnly
+        activeOnlineOnly = onlineOnly
         activeStreamCategoryFilter = categoryFilter?.title ?? ""
         let matchingStreams = streamStore.streams.filter { stream in
-            (!favouritesOnly || stream.isFavourite)
-                && (categoryFilter == nil || stream.category == categoryFilter)
+            streamFilter.matches(stream, availability: streamAvailability.results[stream.url]?.state)
         }
         if !matchingStreams.contains(where: { $0.id == streamStore.selectedStreamID }) {
             streamStore.selectedStreamID = matchingStreams.first?.id
         }
     }
-    private func dismissSearchFocus() {
-        NSApp.keyWindow?.makeFirstResponder(nil)
+    private var selectedStreams: [Stream] {
+        visibleStreams.filter { selectedStreamIDs.contains($0.id) }
     }
 
     private func handleStreamShortcut(_ shortcut: AppShortcut) -> Bool {
-        guard !isTextInputOrMenuActive,
-              let selectedStreamID = streamStore.selectedStreamID else {
+        guard !isTextInputOrMenuActive, !selectedStreams.isEmpty else {
             return false
         }
 
@@ -2533,36 +3446,22 @@ struct StreamManagementView: View {
             shortcutIsEnabled($0) && $0.shortcut(from: keybindValue(for: $0)).matches(shortcut)
         }) {
         case .editSelectedItem:
+            guard selectedStreams.count == 1 else { return false }
+            streamStore.selectedStreamID = selectedStreams[0].id
             showSecondaryWindow(title: "Edit stream", isPresented: $showingEditStream)
         case .toggleFavourite:
-            streamStore.toggleFavourite(selectedStreamID)
+            streamStore.setFavourite(!selectedStreams.allSatisfy(\.isFavourite), for: selectedStreamIDs)
         case .setTelevision:
-            streamStore.setCategory(.television, for: selectedStreamID)
+            streamStore.setCategory(.television, for: selectedStreamIDs)
         case .setRadio:
-            streamStore.setCategory(.radio, for: selectedStreamID)
+            streamStore.setCategory(.radio, for: selectedStreamIDs)
         case .setLiveStream:
-            streamStore.setCategory(.liveStream, for: selectedStreamID)
+            streamStore.setCategory(.liveStream, for: selectedStreamIDs)
         default:
             return false
         }
 
         return true
-    }
-
-    private func handleStreamKeyPress(_ keyPress: KeyPress) -> KeyPress.Result {
-        guard let shortcut = AppShortcut(keyPress: keyPress),
-              handleStreamShortcut(shortcut) else {
-            return .ignored
-        }
-        return .handled
-    }
-
-    private var isTextInputOrMenuActive: Bool {
-        guard let responder = NSApp.keyWindow?.firstResponder else { return false }
-        return responder is NSTextView
-            || responder is NSTextField
-            || responder is NSComboBox
-            || responder is NSPopUpButton
     }
 
     private func keybindValue(for keybinding: AppKeybinding) -> String {
@@ -2633,67 +3532,45 @@ struct StreamManagementView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
 
-                    Menu {
-                        Toggle("All", isOn: allStreamsFilterBinding)
-                        Divider()
-                        Toggle("Favourites", isOn: $favouritesOnly)
-                        Divider()
-                        ForEach(StreamCategory.allCases) { category in
-                            Toggle(category.title, isOn: categoryFilterBinding(for: category))
-                        }
-                    } label: {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous)
-                                .fill(Color.primary.opacity(0.001))
-                            Image(systemName: "line.3.horizontal.decrease.circle")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 18, height: 18)
-                        }
-                        .frame(width: 40, height: 40)
-                        .contentShape(Rectangle())
+                    HStack(spacing: 6) {
+                        if checkStreamAvailability { checkStreamStatusButton }
+                        streamFilterMenu
                     }
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .help("Filter streams")
-                    .zIndex(1)
                 }
                 .padding(.leading, SettingsLayout.horizontalInset)
-                .padding(.trailing, SettingsLayout.horizontalInset + SettingsLayout.scrollbarReserve - 10)
+                .padding(.trailing, SettingsLayout.horizontalInset + SettingsLayout.scrollbarReserve)
             }
             .padding(.top, SettingsLayout.horizontalInset)
             .padding(.bottom, 10)
-            List(selection: $streamStore.selectedStreamID) {
-                ForEach(filteredStreams) { stream in
-                    streamRow(stream)
+            .zIndex(1)
+            StreamOrganisationList(
+                rows: organisationRows, selection: $selectedStreamIDs,
+                editingGroupID: editingGroupID, editingGroupName: editingGroupName,
+                availability: streamAvailability.results, checkingURLs: streamAvailability.checkingURLs,
+                showsStatus: checkStreamAvailability, sessionID: dragSessionID,
+                onToggleGroup: { id in
+                    guard editingGroupID == nil else { return }
+                    groupExpansion(id).wrappedValue.toggle()
+                },
+                onNameChange: { id, name in
+                    if editingGroupID == id { editingGroupName = name }
+                },
+                onNameCommit: { id, name in
+                    guard editingGroupID == id else { return }
+                    editingGroupName = name
+                    saveGroupName()
+                },
+                onNameCancel: { id in
+                    if editingGroupID == id { editingGroupID = nil }
+                },
+                onDelete: requestStreamDeletion,
+                onMenu: organisationMenu,
+                onMove: { drop in
+                    handleOrganisationDrop(drop.payload, toGroup: drop.groupID, relativeTo: drop.anchor, after: drop.after)
                 }
-                .onMove { source, destination in
-                    streamStore.moveFiltered(
-                        fromOffsets: source,
-                        toOffset: destination,
-                        in: filteredStreams
-                    )
-                    focusedTarget = .streamList
-                }
-            }
-            .simultaneousGesture(TapGesture().onEnded {
-                dismissSearchFocus()
-            })
-            .background(PersistentListScroller { needsScrollbar in
-                listNeedsScrollbar = needsScrollbar
-                isStreamListReady = true
-            })
-            .padding(.trailing, listNeedsScrollbar ? 0 : SettingsLayout.scrollbarReserve)
-            .opacity(isStreamListReady ? 1 : 0)
+            )
             .frame(minWidth: 500, minHeight: 440)
-            .padding(.leading, SettingsLayout.horizontalInset - 16)
-            .focusable()
-            .focusEffectDisabled()
-            .focused($focusedTarget, equals: .streamList)
-            .onKeyPress(characters: .alphanumerics) { handleStreamKeyPress($0) }
-            .onDeleteCommand {
-                deleteSelectedStream()
-            }
+            .padding(.horizontal, 6)
 
             Divider()
 
@@ -2702,22 +3579,68 @@ struct StreamManagementView: View {
                     showingResetConfirmation = true
                 }
                 Spacer()
+                Button("Create group", action: createGroup)
                 Button("Add stream") {
                     showSecondaryWindow(title: "Add stream", isPresented: $showingAddStream)
                 }
-                Button("Done") { closeSecondaryWindow() }
-                    .keyboardShortcut(.defaultAction)
+                Button("Done") {
+                    if saveGroupName() { closeSecondaryWindow() }
+                }
+                .buttonStyle(.borderedProminent)
             }
             .padding(.vertical, SettingsLayout.horizontalInset)
                         .padding(.horizontal, SettingsLayout.horizontalInset)
         }
         .navigationTitle("Streams")
+        .overlay(alignment: .bottom) {
+            if let streamCheckNotification {
+                InAppNotificationMessage(message: streamCheckNotification.message)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 88)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: streamCheckNotification?.id)
+        .onChange(of: streamAvailability.lastCheckStarted?.id) { _, _ in
+            guard checkStreamAvailability, showStreamCheckStartInAppNotification,
+                  isSecondaryWindowFocused(title: "Manage streams"),
+                  let event = streamAvailability.lastCheckStarted else { return }
+            streamCheckNotification = event
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                if streamCheckNotification?.id == event.id { streamCheckNotification = nil }
+            }
+        }
         .onAppear {
             applyActiveFilter()
-            installShortcutEventMonitor()
-            DispatchQueue.main.async {
-                focusedTarget = .streamList
+            if let id = streamStore.selectedStreamID, filteredStreams.contains(where: { $0.id == id }) {
+                selectedStreamIDs = [id]
             }
+            installShortcutEventMonitor()
+        }
+        .onChange(of: selectedStreamIDs) { _, ids in
+            if !ids.contains(streamStore.selectedStreamID ?? ""), let first = filteredStreams.first(where: { ids.contains($0.id) }) {
+                streamStore.selectedStreamID = first.id
+            }
+        }
+        .onChange(of: visibleStreams.map(\.id)) { _, ids in
+            selectedStreamIDs.formIntersection(ids)
+        }
+        .onChange(of: streamStore.groups.map(\.id)) { _, ids in
+            collapsedGroupIDs.formIntersection(ids)
+            if let editingGroupID, !ids.contains(editingGroupID) { self.editingGroupID = nil }
+        }
+        .onChange(of: searchText) { _, query in
+            if !query.isEmpty { collapsedGroupIDs.removeAll() }
+        }
+        .onChange(of: streamStore.selectedStreamID) { _, id in
+            guard !isSecondaryWindowFocused(title: "Manage streams"), let id,
+                  !selectedStreamIDs.contains(id),
+                  filteredStreams.contains(where: { $0.id == id }) else { return }
+            if let groupID = streamStore.streams.first(where: { $0.id == id })?.groupID {
+                collapsedGroupIDs.remove(groupID)
+            }
+            selectedStreamIDs = [id]
         }
         .onDisappear {
             removeShortcutEventMonitor()
@@ -2728,9 +3651,12 @@ struct StreamManagementView: View {
             title: "Add stream",
             size: NSSize(width: 520, height: 420)
         ) {
-            StreamEditorView(title: "Add stream") { name, url, category in
-                try streamStore.add(name: name, url: url, category: category)
+            StreamEditorView(title: "Add stream") { name, url, category, groupID in
+                try streamStore.add(name: name, url: url, category: category, groupID: groupID)
+                if let groupID { collapsedGroupIDs.remove(groupID) }
+                if let id = streamStore.selectedStreamID { selectedStreamIDs = [id] }
             }
+            .environmentObject(streamStore)
         }
         .childWindow(
             isPresented: $showingEditStream,
@@ -2738,21 +3664,48 @@ struct StreamManagementView: View {
             size: NSSize(width: 520, height: 420)
         ) {
             if let stream = streamStore.selectedStream {
-                StreamEditorView(title: "Edit stream", stream: stream) { name, url, category in
+                StreamEditorView(title: "Edit stream", stream: stream) { name, url, category, groupID in
                     try streamStore.update(
                         originalName: stream.name,
                         name: name,
                         url: url,
-                        category: category
+                        category: category,
+                        groupID: groupID
                     )
+                    if let groupID { collapsedGroupIDs.remove(groupID) }
+                    if let id = streamStore.selectedStreamID { selectedStreamIDs = [id] }
                 }
+                .environmentObject(streamStore)
             }
         }
-        .alert("Delete stream?", isPresented: $showingDeleteConfirmation) {
-            Button("Delete", role: .destructive) { streamStore.deleteSelected() }
-            Button("Cancel", role: .cancel) {}
+        .alert("Delete group?", isPresented: Binding(
+            get: { groupToDelete != nil },
+            set: { if !$0 { groupToDelete = nil } }
+        )) {
+            Button("Delete", role: .destructive) {
+                if let groupToDelete { streamStore.deleteGroup(groupToDelete.id) }
+                groupToDelete = nil
+            }
+            Button("Cancel", role: .cancel) { groupToDelete = nil }
         } message: {
-            Text("This stream will be removed from the list.")
+            Text("This group will be removed. Any streams within it will be moved to Ungrouped.")
+        }
+        .alert("Couldn't change group", isPresented: Binding(
+            get: { groupError != nil },
+            set: { if !$0 { groupError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(groupError ?? "")
+        }
+        .alert(pendingDeletionIDs.count == 1 ? "Delete stream?" : "Delete \(pendingDeletionIDs.count) streams?", isPresented: $showingDeleteConfirmation) {
+            Button("Delete", role: .destructive) {
+                deleteStreams(pendingDeletionIDs)
+                pendingDeletionIDs.removeAll()
+            }
+            Button("Cancel", role: .cancel) { pendingDeletionIDs.removeAll() }
+        } message: {
+            Text(pendingDeletionIDs.count == 1 ? "This stream will be removed from the list." : "The selected streams will be removed from the list.")
         }
         .alert("Restore default stream list?", isPresented: $showingResetConfirmation) {
             Button("Restore", role: .destructive) {
@@ -2765,71 +3718,171 @@ struct StreamManagementView: View {
     }
 
 
-    private func deleteSelectedStream() {
+    private func groupExpansion(_ id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { !collapsedGroupIDs.contains(id) },
+            set: { expanded in
+                if expanded { collapsedGroupIDs.remove(id) }
+                else { collapsedGroupIDs.insert(id) }
+            }
+        )
+    }
+
+    private func createGroup() {
+        guard saveGroupName() else { return }
+        searchText = ""
+        var name = "New group"
+        var suffix = 2
+        while streamStore.groups.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            name = "New group \(suffix)"
+            suffix += 1
+        }
+        do {
+            let id = try streamStore.addGroup(name: name)
+            editingGroupID = id
+            editingGroupName = name
+            collapsedGroupIDs.remove(id)
+        } catch { groupError = error.localizedDescription }
+    }
+
+    private func renameGroup(_ id: UUID) {
+        guard saveGroupName(), let group = streamStore.groups.first(where: { $0.id == id }) else { return }
+        editingGroupName = group.name
+        editingGroupID = id
+    }
+
+    @discardableResult
+    private func saveGroupName() -> Bool {
+        guard let id = editingGroupID else { return true }
+        do {
+            try streamStore.renameGroup(id, name: editingGroupName)
+            editingGroupID = nil
+            return true
+        } catch {
+            editingGroupName = streamStore.groups.first(where: { $0.id == id })?.name ?? ""
+            editingGroupID = nil
+            groupError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func handleOrganisationDrop(_ payload: StreamOrganisationDrag, toGroup groupID: UUID?, relativeTo anchor: String? = nil, after: Bool) {
+        do {
+            switch payload.content {
+            case .streams(let ids):
+                if try streamStore.moveStreams(ids, toGroup: groupID, relativeTo: anchor, after: after) {
+                    if let groupID { collapsedGroupIDs.remove(groupID) }
+                    selectedStreamIDs = Set(ids).intersection(visibleStreams.map(\.id))
+                }
+            case .group(let id):
+                streamStore.moveGroup(id, relativeTo: groupID, after: after)
+            }
+        } catch { groupError = error.localizedDescription }
+    }
+
+    private func requestStreamDeletion(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
         if skipDeleteConfirmation {
-            streamStore.deleteSelected()
+            deleteStreams(ids)
         } else {
+            pendingDeletionIDs = ids
             showingDeleteConfirmation = true
         }
     }
 
-    @ViewBuilder
-    private func streamRow(_ stream: Stream) -> some View {
-        HStack(spacing: 8) {
-            Text(stream.name)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            if stream.isFavourite {
-                Image(systemName: "star.fill")
-                    .font(.system(size: 14, weight: .medium))
-                    .frame(width: 18, height: 18)
-                    .accessibilityLabel("Favourite")
-            }
-            Image(systemName: stream.category.iconName)
-                .font(.system(size: 14, weight: .medium))
-                .frame(width: 18, height: 18)
-                .accessibilityLabel(stream.category.title)
+    private func requestGroupDeletion(_ group: StreamGroup) {
+        if skipDeleteConfirmation {
+            streamStore.deleteGroup(group.id)
+        } else {
+            groupToDelete = group
         }
-        .tag(Optional(stream.id))
-        .contentShape(Rectangle())
-        .contextMenu {
-            Button(stream.isFavourite ? "Unfavourite" : "Favourite") {
-                streamStore.selectedStreamID = stream.id
-                streamStore.toggleFavourite(stream.id)
-            }
-            Divider()
-            Button("Edit") {
-                streamStore.selectedStreamID = stream.id
-                showSecondaryWindow(title: "Edit stream", isPresented: $showingEditStream)
-            }
-            Divider()
-            Button("Delete", role: .destructive) {
-                streamStore.selectedStreamID = stream.id
-                deleteSelectedStream()
-            }
+    }
+
+    private func deleteStreams(_ ids: Set<String>) {
+        streamStore.deleteStreams(ids)
+        selectedStreamIDs.subtract(ids)
+        if selectedStreamIDs.isEmpty, let id = streamStore.selectedStreamID,
+           filteredStreams.contains(where: { $0.id == id }) { selectedStreamIDs = [id] }
+    }
+
+    private func organisationMenu(_ row: StreamOrganisationRow, selected: Set<String>) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        if case .group(let group, _, _) = row {
+            menu.addItem(StreamListMenuItem("Rename group") { renameGroup(group.id) })
+            menu.addItem(.separator())
+            menu.addItem(StreamListMenuItem("Delete group") { requestGroupDeletion(group) })
+            return menu
         }
+        guard let stream = row.stream else { return menu }
+        let targets = selected.contains(stream.id) ? visibleStreams.filter { selected.contains($0.id) } : [stream]
+        let ids = Set(targets.map(\.id))
+        if checkStreamAvailability {
+            menu.addItem(StreamListMenuItem(targets.count == 1 ? "Check stream status" : "Check selected streams",
+                                            enabled: !targets.allSatisfy { streamAvailability.checkingURLs.contains($0.url) }) {
+                for target in targets { streamAvailability.requestCheck(for: target.url) }
+            })
+            menu.addItem(.separator())
+        }
+        let allFavourites = targets.allSatisfy(\.isFavourite)
+        menu.addItem(StreamListMenuItem(allFavourites ? "Unfavourite" : "Favourite") {
+            streamStore.setFavourite(!allFavourites, for: ids)
+        })
+        let groups = NSMenu()
+        groups.autoenablesItems = false
+        func addGroup(_ title: String, id: UUID?) {
+            groups.addItem(StreamListMenuItem(title, selected: targets.allSatisfy { $0.groupID == id }) {
+                do {
+                    try streamStore.setGroup(id, for: ids)
+                    if let id { collapsedGroupIDs.remove(id) }
+                    selectedStreamIDs = ids
+                } catch { groupError = error.localizedDescription }
+            })
+        }
+        addGroup("Ungrouped", id: nil)
+        if !streamStore.groups.isEmpty { groups.addItem(.separator()) }
+        for group in streamStore.groups { addGroup(group.name, id: group.id) }
+        let groupsItem = NSMenuItem(title: "Group", action: nil, keyEquivalent: "")
+        groupsItem.submenu = groups
+        menu.addItem(groupsItem)
+        menu.addItem(.separator())
+        menu.addItem(StreamListMenuItem("Edit", enabled: targets.count == 1) {
+            selectedStreamIDs = ids
+            streamStore.selectedStreamID = stream.id
+            showSecondaryWindow(title: "Edit stream", isPresented: $showingEditStream)
+        })
+        menu.addItem(.separator())
+        menu.addItem(StreamListMenuItem("Delete") {
+            selectedStreamIDs = ids
+            requestStreamDeletion(ids)
+        })
+        return menu
     }
 }
 
+
 struct StreamEditorView: View {
+    @EnvironmentObject private var streamStore: StreamStore
     let title: String
-    let save: (String, String, StreamCategory) throws -> Void
+    let save: (String, String, StreamCategory, UUID?) throws -> Void
     @State private var name: String
     @State private var url: String
     @State private var category: StreamCategory
+    @State private var groupID: UUID?
     @State private var errorMessage: String?
     @State private var primaryActionEventMonitor: Any?
 
     init(
         title: String,
         stream: Stream? = nil,
-        save: @escaping (String, String, StreamCategory) throws -> Void
+        save: @escaping (String, String, StreamCategory, UUID?) throws -> Void
     ) {
         self.title = title
         self.save = save
         _name = State(initialValue: stream?.name ?? "")
         _url = State(initialValue: stream?.url ?? "")
         _category = State(initialValue: stream?.category ?? .television)
+        _groupID = State(initialValue: stream?.groupID)
     }
 
     var body: some View {
@@ -2837,18 +3890,32 @@ struct StreamEditorView: View {
             Text(title).font(.title2.bold())
             TextField("Choose a stream name (e.g. BBC World News Europe UHD)", text: $name)
             TextField("Paste a stream URL (.mpd or .m3u8 only)", text: $url)
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Stream type")
-                    .font(.headline)
-
-                Picker("", selection: $category) {
-                    ForEach(StreamCategory.allCases) { category in
-                        Text(category.title).tag(category)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 16) {
+                    Text("Stream type")
+                        .font(.headline)
+                        .frame(width: 86, alignment: .leading)
+                    Picker("", selection: $category) {
+                        ForEach(StreamCategory.allCases) { category in
+                            Text(category.title).tag(category)
+                        }
                     }
+                    .labelsHidden()
+                    .pickerStyle(.radioGroup)
+                    .horizontalRadioGroupLayout()
                 }
-                .labelsHidden()
-                .pickerStyle(.radioGroup)
-                .horizontalRadioGroupLayout()
+                HStack(spacing: 16) {
+                    Text("Group")
+                        .font(.headline)
+                        .frame(width: 86, alignment: .leading)
+                    SettingsPopupMenu(
+                        values: [nil] + streamStore.groups.map { Optional($0.id) },
+                        selection: $groupID,
+                        title: { id in streamStore.groups.first { $0.id == id }?.name ?? "Ungrouped" },
+                        maximumWidth: 300
+                    )
+                    .frame(width: 300, height: 22, alignment: .leading)
+                }
             }
             HStack {
                 Spacer()
@@ -2860,6 +3927,10 @@ struct StreamEditorView: View {
         }
         .padding(24)
         .frame(width: 520)
+        .onSubmit(of: .text, saveStream)
+        .onChange(of: streamStore.groups.map(\.id)) { _, ids in
+            if let groupID, !ids.contains(groupID) { self.groupID = nil }
+        }
         .onAppear(perform: installPrimaryActionEventMonitor)
         .onDisappear {
             removeEventMonitor(primaryActionEventMonitor)
@@ -2877,7 +3948,7 @@ struct StreamEditorView: View {
 
     private func saveStream() {
         do {
-            try save(name, url, category)
+            try save(name, url, category, groupID)
             closeSecondaryWindow()
         } catch {
             errorMessage = error.localizedDescription
@@ -2893,24 +3964,31 @@ struct StreamEditorView: View {
 }
 
 struct SettingsView: View {
+    @AppStorage(StreamAvailabilityPreferences.activeOnlineOnlyKey) private var activeOnlineOnly = false
+    @AppStorage(EncodingConfiguration.preferenceKey) private var encodingConfigurationData = Data()
     @ObservedObject var timeOptionsStore: TimeOptionsStore
     @AppStorage("dateFormat") private var dateFormat = "dd/MM/yyyy"
     @AppStorage("downloadFolder") private var downloadFolderPath = ""
     @AppStorage("downloadDefaultHours") private var defaultHours = 0
     @AppStorage("downloadDefaultMinutes") private var defaultMinutes = 1
     @AppStorage("downloadDefaultSeconds") private var defaultSeconds = 0
-    @AppStorage("encodeH265") private var encodeH265 = false
+    @AppStorage("encodeH265") private var defaultEncodeH265 = EncodingConfiguration.defaultEnabled
     @AppStorage("revealFinishedVideo") private var revealFinishedMedia = false
+    @AppStorage("completionPlaybackMode") private var completionPlaybackMode = CompletionPlaybackMode.each.rawValue
     @AppStorage("downloadAttempts") private var downloadAttempts = 3
     @AppStorage("retryDelay") private var retryDelay = 2.0
-    @AppStorage("checkForUpdates") private var checkForUpdates = true
+    @AppStorage(UpdateCheckFrequency.preferenceKey) private var updateCheckFrequency = UpdateCheckFrequency.onLaunch.rawValue
     @AppStorage("skipDeleteConfirmation") private var skipDeleteConfirmation = false
     @AppStorage("sequentialDownloads") private var sequentialDownloads = false
     @AppStorage("segmentDownloadLimit") private var segmentDownloadLimit = 5
+    @AppStorage(StreamAvailabilityPreferences.enabledKey) private var checkStreamAvailability = StreamAvailabilityPreferences.defaultEnabled
+    @AppStorage(StreamAvailabilityPreferences.intervalKey) private var streamAvailabilityInterval = StreamAvailabilityPreferences.defaultInterval
+    @AppStorage(StreamAvailabilityPreferences.startInAppKey) private var showStreamCheckStartInAppNotification = true
+    @AppStorage(StreamAvailabilityPreferences.startSystemKey) private var showStreamCheckStartSystemNotification = false
     @AppStorage("streamLaunchFilter") private var launchStreamFilter = "All"
     @AppStorage("activeStreamCategoryFilter") private var activeStreamCategoryFilter = ""
     @AppStorage("activeFavouritesOnly") private var activeFavouritesOnly = false
-    @AppStorage("downloadFilenameFormat") private var downloadFilenameFormat = DownloadFilenameFormat.firstSegment.rawValue
+    @AppStorage("downloadFilenameFormat") private var downloadFilenameFormat = DownloadFilenameFormat.defaultFormat.rawValue
     @AppStorage("appearanceMode") private var appearanceMode = AppAppearance.system.rawValue
     @AppStorage("downloadStartInAppNotification") private var showDownloadStartInAppNotification = true
     @AppStorage("downloadStartSystemNotification") private var showDownloadStartSystemNotification = false
@@ -2926,13 +4004,37 @@ struct SettingsView: View {
     @State private var primaryActionEventMonitor: Any?
 
     private var streamFilterChoices: [String] {
-        ["All", "Favourites"] + StreamCategory.allCases.map(\.title)
+        ["All", "Favourites", "Online"] + StreamCategory.allCases.map(\.title)
+    }
+
+    private var encodingConfiguration: EncodingConfiguration {
+        (try? JSONDecoder().decode(EncodingConfiguration.self, from: encodingConfigurationData)) ?? .defaults
+    }
+
+    private func encodingBinding<Value>(_ keyPath: WritableKeyPath<EncodingConfiguration, Value>) -> Binding<Value> {
+        Binding(
+            get: { encodingConfiguration[keyPath: keyPath] },
+            set: { value in
+                var updated = encodingConfiguration
+                updated[keyPath: keyPath] = value
+                if let data = try? JSONEncoder().encode(updated) {
+                    encodingConfigurationData = data
+                }
+            }
+        )
     }
 
     private var filenameFormatBinding: Binding<DownloadFilenameFormat> {
         Binding(
-            get: { DownloadFilenameFormat(rawValue: downloadFilenameFormat) ?? .firstSegment },
+            get: { DownloadFilenameFormat(rawValue: downloadFilenameFormat) ?? .defaultFormat },
             set: { downloadFilenameFormat = $0.rawValue }
+        )
+    }
+
+    private var completionPlaybackBinding: Binding<CompletionPlaybackMode> {
+        Binding(
+            get: { CompletionPlaybackMode(rawValue: completionPlaybackMode) ?? .each },
+            set: { completionPlaybackMode = $0.rawValue }
         )
     }
 
@@ -2978,7 +4080,7 @@ struct SettingsView: View {
                                 SettingsMenuPicker(
                                     values: Array(1...10),
                                     selection: Binding(
-                                        get: { min(10, max(1, Int(retryDelay.rounded()))) },
+                                        get: { Int(DownloadLimits.retryDelay(retryDelay).rounded()) },
                                         set: { retryDelay = Double($0) }
                                     ),
                                     title: { seconds in
@@ -3017,6 +4119,54 @@ struct SettingsView: View {
                         }
                     }
 
+                    SettingsSection(title: "Streams") {
+                        SettingsCard {
+                            SettingsToggleRow("Check if streams are active", isOn: $checkStreamAvailability)
+                                .onChange(of: checkStreamAvailability) { _, enabled in
+                                    if enabled { DownloadNotifications.requestPermission() }
+                                }
+                            if checkStreamAvailability {
+                                Divider()
+                                HStack {
+                                    Text("Stream check frequency")
+                                    Spacer()
+                                    SettingsMenuPicker(
+                                        values: StreamAvailabilityPreferences.intervals,
+                                        selection: $streamAvailabilityInterval,
+                                        title: StreamAvailabilityPreferences.intervalTitle
+                                    )
+                                }
+                                .frame(height: ControlMetrics.settingsRowHeight)
+                            }
+                        }
+                    }
+
+                    SettingsSection(title: "Encoding") {
+                        SettingsCard {
+                            HStack {
+                                Text("Encoding method")
+                                Spacer()
+                                SettingsPopupMenu(
+                                    values: EncodingMethod.allCases,
+                                    selection: encodingBinding(\.method),
+                                    title: { $0.title }
+                                )
+                            }
+                            .frame(height: ControlMetrics.settingsRowHeight)
+                            Divider()
+                            HStack {
+                                Text("Quality")
+                                Spacer()
+                                SettingsPopupMenu(
+                                    values: EncodingQuality.allCases,
+                                    selection: encodingBinding(\.quality),
+                                    title: { $0.title }
+                                )
+                            }
+                            .frame(height: ControlMetrics.settingsRowHeight)
+                        }
+                    }
+
                     SettingsSection(title: "Defaults") {
                         SettingsCard {
                             HStack {
@@ -3025,12 +4175,12 @@ struct SettingsView: View {
                                 SettingsPopupMenu(
                                     values: streamFilterChoices,
                                     selection: $launchStreamFilter,
-                                    title: { $0 }
+                                    title: { $0 == "Online" ? "Active" : $0 }
                                 )
                             }
                             .frame(height: ControlMetrics.settingsRowHeight)
                             Divider()
-                            SettingsToggleRow("Encoding enabled", isOn: $encodeH265)
+                            SettingsToggleRow("Encoding enabled", isOn: $defaultEncodeH265)
                             Divider()
                             HStack {
                                 Text("Download duration")
@@ -3056,6 +4206,7 @@ struct SettingsView: View {
                                         }
                                     }
                                     .padding(20)
+                                    .background(InitialKeyboardFocusReset())
                                 }
                             }
                             .frame(height: ControlMetrics.settingsRowHeight)
@@ -3094,6 +4245,14 @@ struct SettingsView: View {
                                     inApp: $showDownloadFailureInAppNotification,
                                     system: $showDownloadFailureSystemNotification
                                 )
+                                if checkStreamAvailability {
+                                    Divider()
+                                    notificationCheckboxRow(
+                                        "when a stream status check starts",
+                                        inApp: $showStreamCheckStartInAppNotification,
+                                        system: $showStreamCheckStartSystemNotification
+                                    )
+                                }
                             }
                             .padding(.leading, 24)
                             .onChange(of: showDownloadStartSystemNotification) { _, _ in
@@ -3104,6 +4263,9 @@ struct SettingsView: View {
                             }
                             .onChange(of: showDownloadFailureSystemNotification) { _, _ in
                                 requestNotificationPermissionIfNeeded()
+                            }
+                            .onChange(of: showStreamCheckStartSystemNotification) { _, _ in
+                                DownloadNotifications.requestPermission()
                             }
                         }
                     }
@@ -3169,10 +4331,32 @@ struct SettingsView: View {
                             .frame(height: ControlMetrics.settingsRowHeight)
                             Divider()
                             SettingsToggleRow("Play media when download completes", isOn: $revealFinishedMedia)
+                            if revealFinishedMedia {
+                                Divider()
+                                HStack {
+                                    Text("Queue autoplay behaviour")
+                                    Spacer()
+                                    SettingsPopupMenu(
+                                        values: CompletionPlaybackMode.allCases,
+                                        selection: completionPlaybackBinding,
+                                        title: { $0.title }
+                                    )
+                                }
+                                .frame(height: ControlMetrics.settingsRowHeight)
+                            }
                             Divider()
                             SettingsToggleRow("Skip delete confirmations", isOn: $skipDeleteConfirmation)
                             Divider()
-                            SettingsToggleRow("Check for updates on launch", isOn: $checkForUpdates)
+                            HStack {
+                                Text("Check for updates")
+                                Spacer()
+                                SettingsPopupMenu(
+                                    values: UpdateCheckFrequency.allCases.map(\.rawValue),
+                                    selection: $updateCheckFrequency,
+                                    title: { (UpdateCheckFrequency(rawValue: $0) ?? .onLaunch).title }
+                                )
+                            }
+                            .frame(height: ControlMetrics.settingsRowHeight)
                         }
                     }
 
@@ -3222,6 +4406,9 @@ struct SettingsView: View {
             prepareSettings()
             installPrimaryActionEventMonitor()
         }
+        .onChange(of: launchStreamFilter) { _, filter in
+            if filter == "Online" { checkStreamAvailability = true }
+        }
         .onDisappear {
             removeEventMonitor(primaryActionEventMonitor)
             primaryActionEventMonitor = nil
@@ -3236,7 +4423,8 @@ struct SettingsView: View {
         .childWindow(
             isPresented: $isManagingKeyboardShortcuts,
             title: "Keyboard shortcuts",
-            size: NSSize(width: 560, height: 540)
+            size: NSSize(width: 560, height: 540),
+            showsWindowTitle: true
         ) {
             KeyboardShortcutsView()
         }
@@ -3265,17 +4453,23 @@ struct SettingsView: View {
     }
 
     private func normaliseMenuSettings() {
+        if UpdateCheckFrequency(rawValue: updateCheckFrequency) == nil {
+            updateCheckFrequency = UpdateCheckFrequency.onLaunch.rawValue
+        }
+        if !StreamAvailabilityPreferences.intervals.contains(streamAvailabilityInterval) {
+            streamAvailabilityInterval = StreamAvailabilityPreferences.defaultInterval
+        }
         if ![2, 5, 10, 15, 20, 25].contains(segmentDownloadLimit) {
             segmentDownloadLimit = 5
         }
         if !(1...10).contains(downloadAttempts) {
             downloadAttempts = 3
         }
-        if !(1...10).contains(Int(retryDelay.rounded())) {
+        if !retryDelay.isFinite || !(1...10).contains(retryDelay) {
             retryDelay = 2
         }
         if DownloadFilenameFormat(rawValue: downloadFilenameFormat) == nil {
-            downloadFilenameFormat = DownloadFilenameFormat.firstSegment.rawValue
+            downloadFilenameFormat = DownloadFilenameFormat.defaultFormat.rawValue
         }
         if AppAppearance(rawValue: appearanceMode) == nil {
             appearanceMode = AppAppearance.system.rawValue
@@ -3283,23 +4477,28 @@ struct SettingsView: View {
     }
 
     private func resetToDefaults() {
+        UserDefaults.standard.removeObject(forKey: EncodingConfiguration.preferenceKey)
         dateFormat = "dd/MM/yyyy"
         defaultHours = 0
         defaultMinutes = 1
         defaultSeconds = 0
-        encodeH265 = false
+        defaultEncodeH265 = EncodingConfiguration.defaultEnabled
         revealFinishedMedia = false
+        completionPlaybackMode = CompletionPlaybackMode.each.rawValue
         downloadAttempts = 3
         retryDelay = 2
-        checkForUpdates = true
+        updateCheckFrequency = UpdateCheckFrequency.onLaunch.rawValue
         skipDeleteConfirmation = false
         launchStreamFilter = "All"
+        activeOnlineOnly = false
         activeStreamCategoryFilter = ""
         activeFavouritesOnly = false
         sequentialDownloads = false
         segmentDownloadLimit = 5
+        checkStreamAvailability = StreamAvailabilityPreferences.defaultEnabled
+        streamAvailabilityInterval = StreamAvailabilityPreferences.defaultInterval
         downloadFolderPath = ""
-        downloadFilenameFormat = DownloadFilenameFormat.firstSegment.rawValue
+        downloadFilenameFormat = DownloadFilenameFormat.defaultFormat.rawValue
         appearanceMode = AppAppearance.system.rawValue
         showDownloadStartInAppNotification = true
         showDownloadStartSystemNotification = false
@@ -3307,6 +4506,8 @@ struct SettingsView: View {
         showDownloadCompletionSystemNotification = false
         showDownloadFailureInAppNotification = true
         showDownloadFailureSystemNotification = false
+        showStreamCheckStartInAppNotification = true
+        showStreamCheckStartSystemNotification = false
         for keybinding in AppKeybinding.allCases {
             UserDefaults.standard.set(keybinding.defaultShortcut.storedValue, forKey: keybinding.rawValue)
             UserDefaults.standard.set(true, forKey: keybinding.enabledStorageKey)
@@ -3315,12 +4516,6 @@ struct SettingsView: View {
 
     private func prepareSettings() {
         DownloadNotifications.migrateLegacyPreferenceIfNeeded()
-        showDownloadStartInAppNotification = UserDefaults.standard.bool(forKey: "downloadStartInAppNotification")
-        showDownloadStartSystemNotification = UserDefaults.standard.bool(forKey: "downloadStartSystemNotification")
-        showDownloadCompletionInAppNotification = UserDefaults.standard.bool(forKey: "downloadCompletionInAppNotification")
-        showDownloadCompletionSystemNotification = UserDefaults.standard.bool(forKey: "downloadCompletionSystemNotification")
-        showDownloadFailureInAppNotification = UserDefaults.standard.bool(forKey: "downloadFailureInAppNotification")
-        showDownloadFailureSystemNotification = UserDefaults.standard.bool(forKey: "downloadFailureSystemNotification")
         normaliseMenuSettings()
         DispatchQueue.main.async {
             NSApp.keyWindow?.makeFirstResponder(nil)
@@ -3652,6 +4847,7 @@ private struct KeyboardShortcutsView: View {
 
 private struct DownloadQueueView: View {
     @ObservedObject var downloadController: DownloadController
+    @AppStorage("dateFormat") private var dateFormat = "dd/MM/yyyy"
     @AppStorage("skipDeleteConfirmation") private var skipDeleteConfirmation = false
     @State private var pendingQueueDeletion: [QueuedDownload] = []
     @State private var isShowingClearQueueConfirmation = false
@@ -3688,38 +4884,42 @@ private struct DownloadQueueView: View {
                     .listRowSeparator(.hidden)
                 }
 
-                Section("Queued downloads") {
-                    if downloadController.queue.isEmpty {
-                        Text("No downloads are queued.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(downloadController.queue) { item in
-                            HStack(spacing: 12) {
-                                requestDetails(for: item.request)
-                                Spacer()
-                                Button(role: .destructive) {
-                                    confirmQueueDeletion([item])
-                                } label: {
-                                    Image(systemName: "trash")
-                                }
-                                .buttonStyle(.borderless)
-                                .help("Remove from queue")
+                Text("Queued downloads")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .listRowBackground(Color.clear)
+
+                if downloadController.queue.isEmpty {
+                    Text("No downloads are queued.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(downloadController.queue) { item in
+                        HStack(spacing: 12) {
+                            requestDetails(for: item.request)
+                            Spacer()
+                            Button(role: .destructive) {
+                                confirmQueueDeletion([item])
+                            } label: {
+                                Image(systemName: "trash")
                             }
-                            .contextMenu {
-                                Button("Remove from queue", role: .destructive) {
-                                    confirmQueueDeletion([item])
-                                }
+                            .buttonStyle(.borderless)
+                            .help("Remove from queue")
+                        }
+                        .contextMenu {
+                            Button("Remove from queue", role: .destructive) {
+                                confirmQueueDeletion([item])
                             }
                         }
-                        .onMove(perform: downloadController.moveQueuedDownloads)
-                        .onDelete { offsets in
-                            confirmQueueDeletion(offsets.map { downloadController.queue[$0] })
-                        }
+                    }
+                    .onMove(perform: downloadController.moveQueuedDownloads)
+                    .onDelete { offsets in
+                        confirmQueueDeletion(offsets.map { downloadController.queue[$0] })
                     }
                 }
             }
-            .padding(.leading, SettingsLayout.horizontalInset - 16)
-            .padding(.trailing, SettingsLayout.scrollbarReserve)
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .padding(.horizontal, SettingsLayout.horizontalInset - 8)
             .frame(minHeight: 360)
 
             Divider()
@@ -3739,7 +4939,7 @@ private struct DownloadQueueView: View {
             }
             .padding(24)
         }
-        .frame(width: 560, height: 520)
+        .frame(width: ControlMetrics.mainWindowWidth, height: 520)
         .onAppear(perform: installPrimaryActionEventMonitor)
         .onDisappear {
             removeEventMonitor(primaryActionEventMonitor)
@@ -3802,26 +5002,38 @@ private struct DownloadQueueView: View {
     }
 
     private func requestDetails(for request: DownloadRequest) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 5) {
             Text(request.stream.name)
                 .lineLimit(1)
-            Text("\(Self.timeFormatter.string(from: request.start)) \(Self.durationText(request.duration))")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            if request.encodeH265 {
-                Text("Encoding enabled")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "clock").fixedSize()
+                    Text(Self.durationText(request.duration))
+                }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Duration: \(Self.durationText(request.duration))")
+                HStack(spacing: 6) {
+                    Image(systemName: "calendar").fixedSize()
+                    Text(DateFormats.displayDateTime(request.start, format: dateFormat))
+                }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Start: \(DateFormats.displayDateTime(request.start, format: dateFormat))")
+                if request.encodeH265 {
+                    Text("Encoded")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+                        .accessibilityLabel("Encoded")
+                        .help("Encoding enabled")
+                }
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
         }
     }
-
-    private static let timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .medium
-        return formatter
-    }()
 
     private static func durationText(_ seconds: Int) -> String {
         let hours = seconds / 3600
@@ -3830,16 +5042,16 @@ private struct DownloadQueueView: View {
         var parts: [String] = []
 
         if hours > 0 {
-            parts.append("\(hours) \(hours == 1 ? "hour" : "hours")")
+            parts.append("\(hours)h")
         }
         if minutes > 0 {
-            parts.append("\(minutes) \(minutes == 1 ? "minute" : "minutes")")
+            parts.append("\(minutes)m")
         }
         if remainingSeconds > 0 || parts.isEmpty {
-            parts.append("\(remainingSeconds) \(remainingSeconds == 1 ? "second" : "seconds")")
+            parts.append("\(remainingSeconds)s")
         }
 
-        return "for \(parts.joined(separator: ", "))"
+        return parts.joined(separator: " ")
     }
 }
 
@@ -3992,14 +5204,6 @@ private struct StartTimeManagementView: View {
             return .ignored
         }
         return .handled
-    }
-
-    private var isTextInputOrMenuActive: Bool {
-        guard let responder = NSApp.keyWindow?.firstResponder else { return false }
-        return responder is NSTextView
-            || responder is NSTextField
-            || responder is NSComboBox
-            || responder is NSPopUpButton
     }
 
     private func installShortcutEventMonitor() {
@@ -4342,6 +5546,7 @@ private struct SettingsPopupMenu<Value: Hashable>: NSViewRepresentable {
     let values: [Value]
     @Binding var selection: Value
     let title: (Value) -> String
+    var maximumWidth: CGFloat? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -4356,6 +5561,7 @@ private struct SettingsPopupMenu<Value: Hashable>: NSViewRepresentable {
     func updateNSView(_ control: SettingsPopupControl, context: Context) {
         context.coordinator.parent = self
         control.displayTitle = title(selection)
+        if control.maximumWidth != maximumWidth { control.maximumWidth = maximumWidth }
         control.itemTitles = values.map(title)
         control.selectedIndex = values.firstIndex(of: selection) ?? 0
         control.onSelection = { context.coordinator.select($0) }
@@ -4383,6 +5589,12 @@ private struct SettingsPopupMenu<Value: Hashable>: NSViewRepresentable {
 @MainActor
 private final class SettingsPopupControl: NSControl {
     private static let controlHeight: CGFloat = 22
+    var maximumWidth: CGFloat? {
+        didSet {
+            invalidateIntrinsicContentSize()
+            needsDisplay = true
+        }
+    }
     var displayTitle = "" {
         didSet {
             invalidateIntrinsicContentSize()
@@ -4405,7 +5617,7 @@ private final class SettingsPopupControl: NSControl {
     override var intrinsicContentSize: NSSize {
         let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14)]
         let titleWidth = (displayTitle as NSString).size(withAttributes: attributes).width
-        return NSSize(width: ceil(titleWidth) + 44, height: Self.controlHeight)
+        return NSSize(width: min(ceil(titleWidth) + 44, maximumWidth ?? .infinity), height: Self.controlHeight)
     }
 
     override init(frame frameRect: NSRect) {
@@ -4521,7 +5733,18 @@ private final class SettingsPopupControl: NSControl {
             x: max(4, circleRect.minX - 15 - textSize.width),
             y: floor((bounds.height - textSize.height) / 2)
         )
-        (displayTitle as NSString).draw(at: textOrigin, withAttributes: attributes)
+        if textSize.width > circleRect.minX - 19 {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byTruncatingTail
+            var truncatedAttributes = attributes
+            truncatedAttributes[.paragraphStyle] = paragraph
+            (displayTitle as NSString).draw(
+                in: NSRect(x: 4, y: textOrigin.y, width: max(0, circleRect.minX - 19), height: textSize.height),
+                withAttributes: truncatedAttributes
+            )
+        } else {
+            (displayTitle as NSString).draw(at: textOrigin, withAttributes: attributes)
+        }
 
     }
 }
