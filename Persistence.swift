@@ -1,5 +1,27 @@
 import Foundation
 
+@MainActor
+final class EditHistory<State: Equatable> {
+    let undoManager = UndoManager()
+
+    init() {
+        undoManager.groupsByEvent = false
+        undoManager.levelsOfUndo = 100
+    }
+
+    func record(_ previous: State, current: State, name: String, restore: @escaping @MainActor (State) -> Void) {
+        guard previous != current else { return }
+        let opensGroup = undoManager.groupingLevel == 0
+        if opensGroup { undoManager.beginUndoGrouping() }
+        undoManager.registerUndo(withTarget: self) { history in
+            restore(previous)
+            history.record(current, current: previous, name: name, restore: restore)
+        }
+        undoManager.setActionName(name)
+        if opensGroup { undoManager.endUndoGrouping() }
+    }
+}
+
 struct RecoverableValue<Value: Decodable>: Decodable {
     let value: Value?
 

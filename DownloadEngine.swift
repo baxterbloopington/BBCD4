@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 import UniformTypeIdentifiers
 import UserNotifications
@@ -65,15 +66,16 @@ struct EncodingConfiguration: Codable, Equatable, Sendable {
         return value
     }
 
-    func videoArguments() -> [String] {
-        switch method {
+    func videoArguments(copyAudio: Bool = true) -> [String] {
+        let video = switch method {
         case .software:
-            return ["-c:v", "libx265", "-tag:v", "hvc1", "-crf", quality.softwareCRF,
-                    "-preset", "ultrafast", "-c:a", "copy"]
+            ["-c:v", "libx265", "-tag:v", "hvc1", "-crf", quality.softwareCRF,
+                    "-preset", "ultrafast"]
         case .hardware:
-            return ["-c:v", "hevc_videotoolbox", "-allow_sw", "0",
-                    "-q:v", quality.hardwareQuality, "-tag:v", "hvc1", "-c:a", "copy"]
+            ["-c:v", "hevc_videotoolbox", "-allow_sw", "0",
+                    "-q:v", quality.hardwareQuality, "-tag:v", "hvc1"]
         }
+        return video + (copyAudio ? ["-c:a", "copy"] : [])
     }
 }
 
@@ -105,14 +107,19 @@ struct DownloadRequest: Sendable, Codable {
     let retryDelay: Double
     let maximumConcurrentSegments: Int
     let filenameFormat: DownloadFilenameFormat
-    // Optional for compatibility with queues saved before encoding settings existed.
+
     var encodingConfiguration: EncodingConfiguration? = nil
+    var editOutput = false
+    var shouldEncodeDownload: Bool {
+        encodeH265 && MediaTrimPreferences.canEncodeDownload(category: stream.category, editing: editOutput)
+    }
 }
 
 extension DownloadRequest {
     private enum CodingKeys: String, CodingKey {
         case stream, start, duration, outputFolder, encodeH265, retryAttempts, retryDelay
         case maximumConcurrentSegments, filenameFormat, encodingConfiguration
+        case editOutput = "trimVideo"
     }
 
     init(from decoder: Decoder) throws {
@@ -126,6 +133,7 @@ extension DownloadRequest {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid saved download range or folder"))
         }
         encodeH265 = (try? values.decode(Bool.self, forKey: .encodeH265)) ?? false
+        editOutput = (try? values.decode(Bool.self, forKey: .editOutput)) ?? false
         retryAttempts = min(10, max(1, (try? values.decode(Int.self, forKey: .retryAttempts)) ?? 3))
         retryDelay = DownloadLimits.retryDelay((try? values.decode(Double.self, forKey: .retryDelay)) ?? 2)
         maximumConcurrentSegments = min(50, max(1, (try? values.decode(Int.self, forKey: .maximumConcurrentSegments)) ?? 5))
@@ -144,6 +152,31 @@ struct QueuedDownload: Identifiable, Codable, Sendable {
     init(id: UUID = UUID(), request: DownloadRequest) {
         self.id = id
         self.request = request
+    }
+}
+
+struct PendingOutputEdit: Identifiable, Codable, Sendable {
+    let id: UUID
+    let request: DownloadRequest?
+    let output: URL
+    var title: String { request?.stream.name ?? output.deletingPathExtension().lastPathComponent }
+
+    init(id: UUID = UUID(), request: DownloadRequest? = nil, output: URL) {
+        self.id = id
+        self.request = request
+        self.output = output
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, request, output }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        request = try values.decodeIfPresent(DownloadRequest.self, forKey: .request)
+        output = try values.decode(URL.self, forKey: .output)
+        guard output.isFileURL else {
+            throw DecodingError.dataCorruptedError(forKey: .output, in: values, debugDescription: "An output edit requires a local file.")
+        }
     }
 }
 
@@ -361,11 +394,11 @@ enum DownloadNotifications {
     }
 
     static func startMessage(for request: DownloadRequest) -> String {
-        "Downloading \(request.stream.name) from \(formattedDateTime(request.start)) for \(formattedDuration(request.duration))."
+        "Downloading \(request.stream.name) from \(formattedDateTime(request.start)) for \(DateFormats.duration(request.duration))."
     }
 
     static func inAppStartMessage(for request: DownloadRequest) -> String {
-        "Downloading \(request.stream.name) for \(formattedDuration(request.duration))"
+        "Downloading \(request.stream.name) for \(DateFormats.duration(request.duration))"
     }
 
     static func postStreamStatusCheckStarted(_ event: StreamStatusCheckStarted) {
@@ -384,7 +417,7 @@ enum DownloadNotifications {
     }
 
     static func completionMessage(for request: DownloadRequest) -> String {
-        "Successfully downloaded \(request.stream.name) for \(formattedDuration(request.duration)) on \(formattedDateTime(request.start))."
+        "Successfully downloaded \(request.stream.name) for \(DateFormats.duration(request.duration)) on \(formattedDateTime(request.start))."
     }
 
     static func postIncomplete(failedSegmentCount: Int, totalSegmentCount: Int) {
@@ -408,18 +441,6 @@ enum DownloadNotifications {
             date,
             format: UserDefaults.standard.string(forKey: "dateFormat") ?? "dd/MM/yyyy"
         )
-    }
-
-    private static func formattedDuration(_ totalSeconds: Int) -> String {
-        let hours = totalSeconds / 3_600
-        let minutes = (totalSeconds % 3_600) / 60
-        let seconds = totalSeconds % 60
-
-        var components: [String] = []
-        if hours > 0 { components.append("\(hours)h") }
-        if minutes > 0 { components.append("\(minutes)m") }
-        if seconds > 0 || components.isEmpty { components.append("\(seconds)s") }
-        return components.joined(separator: " ")
     }
 
     private static func postSystemNotification(
@@ -486,6 +507,8 @@ enum DownloadNotifications {
 
 @MainActor
 final class DownloadController: ObservableObject {
+    typealias DownloadRunner = @Sendable (DownloadRequest, @escaping @Sendable (DownloadUpdate) async -> Void) async throws -> URL
+    typealias OutputEditor = @MainActor (URL, String) async -> URL?
     @Published private(set) var status = "Ready"
     @Published private(set) var progress = 0.0 {
         didSet { updateDockProgress() }
@@ -503,6 +526,8 @@ final class DownloadController: ObservableObject {
     @Published private(set) var lastDownloadStartedFromQueue = false
     @Published private(set) var queue: [QueuedDownload]
     @Published private(set) var isQueuePaused: Bool
+    @Published private(set) var pendingEdits: [PendingOutputEdit]
+    @Published private(set) var activeEditID: UUID?
     private var completionSequencePosition = 0
     private var activeTask: Task<Void, Never>?
     private var activeOperationID: UUID?
@@ -512,13 +537,33 @@ final class DownloadController: ObservableObject {
 
     private let defaults: UserDefaults
     private var queueRecoveryData: Data?
+    private let pendingEditsKey = "BBCD4Mac.pendingOutputEdits"
+    private var editsRecoveryData: Data?
+    private var editingTask: Task<Void, Never>?
+    private let runDownload: DownloadRunner
+    private let presentEditor: OutputEditor
+    private var isShuttingDown = false
 
-    init(defaults: UserDefaults = .standard, automaticallyStartsQueue: Bool = true) {
+    init(defaults: UserDefaults = .standard, automaticallyStartsQueue: Bool = true,
+         runDownload: @escaping DownloadRunner = DownloadEngine.run,
+         presentEditor: @escaping OutputEditor = MediaTrimWindow.present) {
         self.defaults = defaults
+        self.runDownload = runDownload
+        self.presentEditor = presentEditor
         let loaded = Self.loadQueue(in: defaults)
         queue = loaded.items
         queueRecoveryData = loaded.recovery
         isQueuePaused = defaults.bool(forKey: queuePauseDefaultsKey)
+        if let data = defaults.data(forKey: pendingEditsKey) {
+            let decoded = try? JSONDecoder().decode(RecoverableArray<PendingOutputEdit>.self, from: data)
+            var ids = Set<UUID>()
+            var paths = Set<String>()
+            pendingEdits = (decoded?.values ?? []).filter {
+                ids.insert($0.id).inserted && paths.insert($0.output.standardizedFileURL.path).inserted
+            }
+            if decoded == nil || decoded?.skippedCount != 0 || pendingEdits.count != decoded?.values.count { editsRecoveryData = data }
+        } else { pendingEdits = [] }
+
         if automaticallyStartsQueue {
             DispatchQueue.main.async { [weak self] in
                 self?.startNextDownloadIfPossible()
@@ -593,16 +638,11 @@ final class DownloadController: ObservableObject {
         activeTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let output = try await DownloadEngine.run(request) { update in
+                let output = try await runDownload(request) { update in
                     await self.apply(update, operationID: operationID)
                 }
                 guard self.isCurrent(operationID) else { return }
-                let namedOutput = try chooseCompletedFilename(for: request, output: output)
-                recordCompletion(request: request, output: namedOutput)
-                progress = 1
-                status = "Done!"
-                DownloadNotifications.postCompletion(request: request, output: namedOutput)
-                finishOperation(operationID)
+                try await completeDownload(request: request, output: output, operationID: operationID)
             } catch DownloadError.incomplete(let incomplete) {
                 guard self.isCurrent(operationID) else { return }
                 status = "Download incomplete"
@@ -638,12 +678,7 @@ final class DownloadController: ObservableObject {
                     await self.apply(update, operationID: operationID)
                 }
                 guard self.isCurrent(operationID) else { return }
-                let namedOutput = try chooseCompletedFilename(for: incomplete.request, output: output)
-                recordCompletion(request: incomplete.request, output: namedOutput)
-                progress = 1
-                status = "Done!"
-                DownloadNotifications.postCompletion(request: incomplete.request, output: namedOutput)
-                finishOperation(operationID)
+                try await completeDownload(request: incomplete.request, output: output, operationID: operationID)
             } catch is CancellationError {
                 finishCancelled(operationID)
             } catch {
@@ -679,12 +714,7 @@ final class DownloadController: ObservableObject {
                     await self.apply(update, operationID: operationID)
                 }
                 guard self.isCurrent(operationID) else { return }
-                let namedOutput = try chooseCompletedFilename(for: incomplete.request, output: output)
-                recordCompletion(request: incomplete.request, output: namedOutput)
-                progress = 1
-                status = "Done!"
-                DownloadNotifications.postCompletion(request: incomplete.request, output: namedOutput)
-                finishOperation(operationID)
+                try await completeDownload(request: incomplete.request, output: output, operationID: operationID)
             } catch DownloadError.incomplete(let nextIncomplete) {
                 guard self.isCurrent(operationID) else { return }
                 status = "Download incomplete"
@@ -751,7 +781,6 @@ final class DownloadController: ObservableObject {
         progress = update.progress
     }
 
-    /// The completed download is kept under its generated name if Save is cancelled.
     private func chooseCompletedFilename(for request: DownloadRequest, output: URL) throws -> URL {
         guard request.filenameFormat == .askEachTime else { return output }
         let panel = NSSavePanel()
@@ -763,8 +792,10 @@ final class DownloadController: ObservableObject {
             panel.allowedContentTypes = [type]
         }
         panel.canCreateDirectories = true
+        let validator = OutputNameValidator { [weak self] destination in try self?.validateOutputDestination(destination) }
+        panel.delegate = validator
         NSApp.activate(ignoringOtherApps: true)
-        guard panel.runModal() == .OK, let destination = panel.url,
+        guard withExtendedLifetime(validator, { panel.runModal() }) == .OK, let destination = panel.url,
               destination.standardizedFileURL != output.standardizedFileURL else { return output }
         if FileManager.default.fileExists(atPath: destination.path) {
             _ = try FileManager.default.replaceItemAt(destination, withItemAt: output)
@@ -774,20 +805,143 @@ final class DownloadController: ObservableObject {
         return destination
     }
 
-    private var playbackBatchActive = false
+    func validateOutputDestination(_ destination: URL) throws {
+        let path = destination.resolvingSymlinksInPath().standardizedFileURL
+        guard !pendingEdits.contains(where: { $0.output.resolvingSymlinksInPath().standardizedFileURL == path }) else {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteFileExistsError,
+                          userInfo: [NSLocalizedDescriptionKey: "This file is awaiting editing. Choose a different filename."])
+        }
+    }
 
-    private func recordCompletion(request: DownloadRequest, output: URL) {
+    @MainActor private final class OutputNameValidator: NSObject, NSOpenSavePanelDelegate {
+        let validate: (URL) throws -> Void
+        init(validate: @escaping (URL) throws -> Void) { self.validate = validate }
+        func panel(_ sender: Any, validate url: URL) throws { try validate(url) }
+    }
+
+    private var playbackBatchActive = false
+    private var hasPendingDownloadEdits: Bool { pendingEdits.contains { $0.request != nil } }
+
+    private func completeDownload(request: DownloadRequest, output: URL, operationID: UUID) async throws {
+        try Task.checkCancellation()
+        guard isCurrent(operationID) else { return }
+        let finalOutput = try chooseCompletedFilename(for: request, output: output)
+        try Task.checkCancellation()
+        guard isCurrent(operationID) else { return }
+        if request.editOutput {
+            let edit = PendingOutputEdit(request: request, output: finalOutput)
+            pendingEdits.append(edit)
+            savePendingEdits()
+            progress = 1
+            status = "Downloaded — awaiting editing"
+            finishOperation(operationID)
+            openNextPendingEdit()
+            return
+        }
+        recordCompletion(request: request, output: finalOutput, finishingDownload: true)
+        progress = 1
+        status = "Done!"
+        DownloadNotifications.postCompletion(request: request, output: finalOutput)
+        finishOperation(operationID)
+    }
+
+    private func recordCompletion(request: DownloadRequest, output: URL, finishingDownload: Bool = false) {
         completionSequencePosition += 1
-        let defaults = UserDefaults.standard
         if defaults.bool(forKey: "revealFinishedVideo") {
             let mode = defaults.string(forKey: "completionPlaybackMode") ?? "each"
             let shouldPlay = mode == "each"
                 || (mode == "first" && completionSequencePosition == 1)
-                || (mode == "last" && queue.isEmpty)
+                || (mode == "last" && queue.isEmpty && !hasPendingDownloadEdits && (finishingDownload || !isDownloading))
             if shouldPlay { NSWorkspace.shared.open(output) }
         }
         completedRequest = request
         completedOutput = output
+    }
+
+    func openPendingEdit(_ edit: PendingOutputEdit) {
+        guard !isShuttingDown, activeEditID == nil, pendingEdits.contains(where: { $0.id == edit.id }) else { return }
+        guard FileManager.default.fileExists(atPath: edit.output.path) else {
+            errorMessage = "The file awaiting editing could not be found: \(edit.output.lastPathComponent)"
+            return
+        }
+        activeEditID = edit.id
+        editingTask = Task { [weak self, presentEditor] in
+            let output = await presentEditor(edit.output, edit.title)
+            guard let self, !Task.isCancelled else { return }
+            self.activeEditID = nil
+            self.editingTask = nil
+            self.finishPendingEdit(edit, output: output ?? edit.output)
+
+            self.openNextPendingEdit()
+        }
+    }
+
+    @discardableResult
+    func openLocalMedia(_ source: URL) async throws -> PendingOutputEdit {
+        guard source.isFileURL, ["mp4", "m4a"].contains(source.pathExtension.lowercased()) else {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnsupportedSchemeError,
+                          userInfo: [NSLocalizedDescriptionKey: "Choose an MP4 video or M4A audio file."])
+        }
+        let source = source.resolvingSymlinksInPath().standardizedFileURL
+        if let existing = pendingEdits.first(where: { $0.output.resolvingSymlinksInPath().standardizedFileURL == source }) {
+            openPendingEdit(existing)
+            return existing
+        }
+        let asset = AVURLAsset(url: source)
+        let duration = try await asset.load(.duration).seconds
+        let tracks = try await asset.load(.tracks)
+        guard duration.isFinite, duration > 0, duration <= FrameTimecode.maximumTime,
+              tracks.contains(where: { [.video, .audio].contains($0.mediaType) }) else { throw MediaTrimError.noMedia }
+        try Task.checkCancellation()
+        guard !isShuttingDown else { throw CancellationError() }
+
+        if let existing = pendingEdits.first(where: { $0.output.resolvingSymlinksInPath().standardizedFileURL == source }) {
+            return existing
+        }
+        let edit = PendingOutputEdit(output: source)
+        pendingEdits.append(edit)
+        savePendingEdits()
+        openPendingEdit(edit)
+        return edit
+    }
+
+    private func openNextPendingEdit() {
+        if let next = pendingEdits.first(where: { FileManager.default.fileExists(atPath: $0.output.path) }) {
+            openPendingEdit(next)
+        }
+    }
+
+    func keepUneditedOutput(_ edit: PendingOutputEdit) {
+        guard activeEditID != edit.id else { return }
+        finishPendingEdit(edit, output: edit.output)
+    }
+
+    private func finishPendingEdit(_ edit: PendingOutputEdit, output: URL) {
+        guard pendingEdits.contains(where: { $0.id == edit.id }) else { return }
+        pendingEdits.removeAll { $0.id == edit.id }
+        savePendingEdits()
+        if let request = edit.request {
+            recordCompletion(request: request, output: output)
+            DownloadNotifications.postCompletion(request: request, output: output)
+        }
+        if !isDownloading && incompleteDownload == nil {
+            status = pendingEdits.isEmpty ? (edit.request == nil ? "Ready" : "Done!") : "Awaiting editing"
+        }
+        startNextDownloadIfPossible()
+    }
+
+    private func savePendingEdits() {
+        guard let data = try? JSONEncoder().encode(pendingEdits) else { return }
+        if let editsRecoveryData {
+            defaults.set(editsRecoveryData, forKey: pendingEditsKey + ".recovery-" + UUID().uuidString)
+            self.editsRecoveryData = nil
+        }
+        defaults.set(data, forKey: pendingEditsKey)
+    }
+
+    func prepareToQuit() {
+        isShuttingDown = true
+        editingTask?.cancel()
     }
 
     private func resolveIncompleteDownload(_ incomplete: IncompleteDownload, operationID: UUID) {
@@ -844,10 +998,10 @@ final class DownloadController: ObservableObject {
     }
 
     private func startNextDownloadIfPossible() {
-        if !isDownloading && incompleteDownload == nil && queue.isEmpty {
+        if !isDownloading && incompleteDownload == nil && queue.isEmpty && !hasPendingDownloadEdits {
             playbackBatchActive = false
         }
-        guard !isQueuePaused, !isDownloading, incompleteDownload == nil, !queue.isEmpty else { return }
+        guard !isShuttingDown, !isQueuePaused, !isDownloading, incompleteDownload == nil, !queue.isEmpty else { return }
         let next = queue.removeFirst()
         saveQueue()
         start(next.request, fromQueue: true)
@@ -880,8 +1034,6 @@ enum DownloadEngine {
     private static let segmentDuration = 3.84
     private static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36"
 
-    // Worker groups enforce each request's limit; the connection pool must not
-    // impose a lower per-host ceiling on those transfers.
     private static let maximumMediaTransfers = 50
     private static let mediaSession: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -918,8 +1070,7 @@ enum DownloadEngine {
         let audio = parser.representations.filter { $0.type == .audio }.min { $0.bandwidth < $1.bandwidth }
         let required = [video, audio].compactMap { $0 }
         guard !required.isEmpty else { return false }
-        // Leave room for publication delay, but never treat an old manifest
-        // alone as evidence that the stream is still serving live media.
+
         for age in [15.0, 30.0, 60.0] {
             try Task.checkCancellation()
             let time = Date().addingTimeInterval(-age)
@@ -961,9 +1112,8 @@ enum DownloadEngine {
     private static func availabilityManifest(_ url: URL) async throws -> (Data, URL) {
         let (bytes, response) = try await availabilitySession.bytes(for: availabilityRequest(url))
         defer { bytes.task.cancel() }
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw DownloadError.invalidStream
-        }
+        guard let http = response as? HTTPURLResponse else { throw DownloadError.invalidStream }
+        guard (200..<300).contains(http.statusCode) else { throw DownloadError.httpStatus(http.statusCode, url) }
         let maximumSize = 1_048_576
         guard response.expectedContentLength <= maximumSize else { throw DownloadError.invalidStream }
         var data = Data()
@@ -981,8 +1131,10 @@ enum DownloadEngine {
         let (bytes, response) = try await availabilitySession.bytes(for: request)
         defer { bytes.task.cancel() }
         let mimeType = response.mimeType?.lowercased() ?? ""
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-              !mimeType.hasPrefix("text/"), !mimeType.contains("json"), !mimeType.contains("xml") else { return false }
+        guard let http = response as? HTTPURLResponse else { throw DownloadError.invalidStream }
+        if [404, 410].contains(http.statusCode) { return false }
+        guard (200..<300).contains(http.statusCode) else { throw DownloadError.httpStatus(http.statusCode, url) }
+        guard !mimeType.hasPrefix("text/"), !mimeType.contains("json"), !mimeType.contains("xml") else { return false }
         var iterator = bytes.makeAsyncIterator()
         guard let firstByte = try await iterator.next() else { return false }
         return firstByte != 0x3c && firstByte != 0x7b
@@ -1069,8 +1221,6 @@ enum DownloadEngine {
             }
         }
 
-        // BBC segment numbers are epoch-based. Always select the segment that
-        // begins at or before the requested time, never the next segment.
         let startSegment = segmentStarting(atOrBefore: request.start)
         let endSegment = Int(ceil((request.start.timeIntervalSince1970 + Double(request.duration)) / segmentDuration)) - 1
         let segments = Array(startSegment...endSegment)
@@ -1149,7 +1299,7 @@ enum DownloadEngine {
                     "-i", workspace.appendingPathComponent("audio.mp4").path
                 ]
                     + codecArguments(for: request) + [output.path]
-                if request.encodeH265 {
+                if request.shouldEncodeDownload {
                     try await runFFmpegWithEncodingProgress(
                         mergeArguments,
                         duration: request.duration,
@@ -1226,7 +1376,7 @@ enum DownloadEngine {
                 "-y", "-i", workspace.appendingPathComponent("fmp4.mp4").path
             ]
                 + codecArguments(for: request) + [output.path]
-            if request.encodeH265 {
+            if request.shouldEncodeDownload {
                 try await runFFmpegWithEncodingProgress(
                     mergeArguments,
                     duration: request.duration,
@@ -1276,7 +1426,7 @@ enum DownloadEngine {
                     "-y", "-f", "concat", "-safe", "0", "-i", workspace.appendingPathComponent("list.txt").path
                 ]
                     + codecArguments(for: request) + [output.path]
-                if request.encodeH265 {
+                if request.shouldEncodeDownload {
                     try await runFFmpegWithEncodingProgress(
                         mergeArguments,
                         duration: request.duration,
@@ -1417,7 +1567,7 @@ enum DownloadEngine {
             }
         }
 
-        await update(.init(status: incomplete.request.encodeH265 ? "Encoding…" : "Merging…", progress: 1))
+        await update(.init(status: incomplete.request.shouldEncodeDownload ? "Encoding…" : "Merging…", progress: 1))
         try await finish(
             kind: incomplete.kind,
             workspace: incomplete.workspace,
@@ -1765,7 +1915,7 @@ enum DownloadEngine {
     }
 
     private static func codecArguments(for request: DownloadRequest) -> [String] {
-        guard request.encodeH265 else { return ["-c", "copy"] }
+        guard request.shouldEncodeDownload else { return ["-c", "copy"] }
         return (request.encodingConfiguration ?? .defaults).videoArguments()
     }
 
@@ -1773,16 +1923,8 @@ enum DownloadEngine {
         Int(floor(date.timeIntervalSince1970 / segmentDuration))
     }
 
-    private static func ffmpegExecutable() throws -> URL {
-        let locations = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
-        guard let path = locations.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
-            throw DownloadError.ffmpegMissing
-        }
-        return URL(fileURLWithPath: path)
-    }
-
     private static func runFFmpeg(_ arguments: [String]) async throws {
-        try await MediaProcess.run(executable: ffmpegExecutable(), arguments: ["-nostdin"] + arguments)
+        try await MediaProcess.run(executable: MediaProcess.ffmpegExecutable(), arguments: ["-nostdin"] + arguments)
     }
 
     private static func runFFmpegWithEncodingProgress(
@@ -1790,46 +1932,11 @@ enum DownloadEngine {
         duration: Int,
         update: @escaping @Sendable (DownloadUpdate) async -> Void
     ) async throws {
-        let reader = FFmpegProgressReader()
-        let totalDuration = Double(max(duration, 1))
-        await update(.init(status: "Encoding… 0%", progress: 0))
-        try await MediaProcess.run(
-            executable: ffmpegExecutable(),
-            arguments: ["-v", "error", "-progress", "pipe:1", "-nostats", "-nostdin"] + arguments
-        ) { data in
-            for seconds in reader.consume(data) {
-                let progress = min(0.99, max(0, seconds / totalDuration))
-                let percentage = Int((progress * 100).rounded(.down))
-                Task { await update(.init(status: "Encoding… \(percentage)%", progress: progress)) }
-            }
+        try await MediaProcess.runFFmpegWithProgress(arguments: arguments, duration: Double(max(duration, 1))) { progress in
+            let percentage = Int((progress * 100).rounded(.down))
+            await update(.init(status: "Encoding… \(percentage)%", progress: progress))
         }
         await update(.init(status: "Encoding… 100%", progress: 1))
-    }
-
-    private final class FFmpegProgressReader: @unchecked Sendable {
-        private let lock = NSLock()
-        private var buffer = Data()
-
-        func consume(_ data: Data) -> [Double] {
-            lock.lock()
-            defer { lock.unlock() }
-            buffer.append(data)
-
-            var timestamps: [Double] = []
-            while let newline = buffer.firstIndex(of: 10) {
-                let line = String(decoding: buffer[..<newline], as: UTF8.self)
-                buffer.removeSubrange(...newline)
-
-                if line.hasPrefix("out_time_us=") || line.hasPrefix("out_time_ms=") {
-                    let value = line.split(separator: "=", maxSplits: 1).last.flatMap { Double($0) }
-                    if let value, value.isFinite, value >= 0 {
-                        timestamps.append(value / 1_000_000)
-                    }
-                }
-            }
-            if buffer.count > 65_536 { buffer.removeAll(keepingCapacity: false) }
-            return timestamps
-        }
     }
 
     private static func outputURL(

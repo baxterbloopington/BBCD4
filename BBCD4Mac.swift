@@ -1,6 +1,8 @@
 import AppKit
 import Darwin
 import SwiftUI
+import Combine
+import UniformTypeIdentifiers
 import UserNotifications
 
 enum AppResources {
@@ -109,11 +111,103 @@ private enum SingleInstance {
     }
 }
 
+enum AppMenuCommand: Int {
+    case openMedia = 100, mainWindow, downloadQueue, checkForUpdates, outputEditor
+}
+
+@MainActor
+final class AppMenuController: NSObject, NSMenuItemValidation {
+    let actions = PassthroughSubject<AppMenuCommand, Never>()
+    let downloadController: DownloadController
+    var isCheckingUpdates = false
+    var isOpeningMedia = false
+    var openMedia: (() -> Void)?
+    var showMainWindow: (() -> Void)?
+    private(set) var windowMenu = NSMenu(title: "Window")
+
+    init(downloadController: DownloadController) { self.downloadController = downloadController }
+
+    func makeMenu() -> NSMenu {
+        let main = NSMenu()
+        func submenu(_ title: String) -> NSMenu {
+            let menu = NSMenu(title: title)
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.submenu = menu
+            main.addItem(item)
+            return menu
+        }
+        func command(_ title: String, _ action: AppMenuCommand, in menu: NSMenu, key: String = "") {
+            let item = NSMenuItem(title: title, action: #selector(invoke(_:)), keyEquivalent: key)
+            item.target = self
+            item.tag = action.rawValue
+            menu.addItem(item)
+        }
+        let app = submenu("BBCD4")
+        app.addItem(withTitle: "About BBCD4", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        command("Check for Updates…", .checkForUpdates, in: app)
+        app.addItem(.separator())
+        app.addItem(withTitle: "Hide BBCD4", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = app.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        app.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        app.addItem(.separator())
+        app.addItem(withTitle: "Quit BBCD4", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        let file = submenu("File")
+        command("Open…", .openMedia, in: file, key: "o")
+        file.addItem(.separator())
+        file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+
+        let edit = submenu("Edit")
+        edit.addItem(withTitle: "Undo", action: #selector(EditingWindow.undoContent(_:)), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: #selector(EditingWindow.redoContent(_:)), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSResponder.selectAll(_:)), keyEquivalent: "a")
+
+        windowMenu = submenu("Window")
+        command("Main Window", .mainWindow, in: windowMenu)
+        command("Output Editor", .outputEditor, in: windowMenu)
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        return main
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard let command = AppMenuCommand(rawValue: item.tag) else { return false }
+        switch command {
+        case .openMedia: return !isOpeningMedia
+        case .checkForUpdates:
+            item.title = isCheckingUpdates ? "Checking for Updates…" : "Check for Updates…"
+            return !isCheckingUpdates
+        case .outputEditor: return downloadController.activeEditID != nil
+        default: return true
+        }
+    }
+
+    @objc func invoke(_ item: NSMenuItem) {
+        guard validateMenuItem(item), let command = AppMenuCommand(rawValue: item.tag) else { return }
+        switch command {
+        case .openMedia: openMedia?()
+        case .mainWindow: showMainWindow?()
+        case .outputEditor: MediaTrimWindow.focusCurrent()
+        default:
+            if command == .checkForUpdates { showMainWindow?() }
+            actions.send(command)
+        }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow?
     private let streamStore = StreamStore()
     private let downloadController = DownloadController()
+    private lazy var menuController = AppMenuController(downloadController: downloadController)
+    private var mediaImportTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         DistributedNotificationCenter.default().addObserver(
@@ -128,10 +222,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DownloadNotifications.migrateLegacyPreferenceIfNeeded()
         (AppAppearance(rawValue: UserDefaults.standard.string(forKey: "appearanceMode") ?? "") ?? .system).apply()
         installMainMenu()
-        let rootView = ContentView(downloadController: downloadController)
+        let rootView = ContentView(downloadController: downloadController, menuController: menuController)
             .environmentObject(streamStore)
         let controller = NSHostingController(rootView: rootView)
-        let contentSize = NSSize(width: ControlMetrics.mainWindowWidth, height: 520)
+        let contentSize = NSSize(width: ControlMetrics.mainWindowWidth, height: ControlMetrics.mainWindowHeight)
         let window = MainInputWindow(
             contentRect: NSRect(origin: .zero, size: contentSize),
             styleMask: [.titled, .closable, .miniaturizable],
@@ -163,31 +257,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func installMainMenu() {
-        let mainMenu = NSMenu()
+        menuController.openMedia = { [weak self] in self?.openMedia() }
+        menuController.showMainWindow = { [weak self] in self?.activateExistingApp() }
+        NSApp.mainMenu = menuController.makeMenu()
+        NSApp.windowsMenu = menuController.windowMenu
+    }
 
-        let applicationItem = NSMenuItem()
-        let applicationMenu = NSMenu()
-        applicationMenu.addItem(
-            withTitle: "Quit BBCD4",
-            action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "q"
-        )
-        applicationItem.submenu = applicationMenu
-        mainMenu.addItem(applicationItem)
-
-        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
-        let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Undo", action: #selector(UndoManager.undo), keyEquivalent: "z")
-        editMenu.addItem(withTitle: "Redo", action: #selector(UndoManager.redo), keyEquivalent: "Z")
-        editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSResponder.selectAll(_:)), keyEquivalent: "a")
-        editItem.submenu = editMenu
-        mainMenu.addItem(editItem)
-
-        NSApp.mainMenu = mainMenu
+    private func openMedia() {
+        guard mediaImportTask == nil else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Open media to edit or encode"
+        panel.prompt = "Open"
+        panel.allowedContentTypes = [.mpeg4Movie, .mpeg4Audio]
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        guard panel.runModal() == .OK else { return }
+        let urls = panel.urls
+        menuController.isOpeningMedia = true
+        mediaImportTask = Task { [weak self] in
+            guard let self else { return }
+            defer { menuController.isOpeningMedia = false; mediaImportTask = nil }
+            for url in urls {
+                do { _ = try await downloadController.openLocalMedia(url) }
+                catch is CancellationError { return }
+                catch {
+                    let alert = NSAlert()
+                    alert.messageText = "Couldn’t open media"
+                    alert.informativeText = "\(url.lastPathComponent)\n\n\(error.localizedDescription)"
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
+            }
+            if downloadController.pendingEdits.count > 1 { menuController.actions.send(.downloadQueue) }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -204,7 +306,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        return confirmCancellationBeforeQuitting() ? .terminateNow : .terminateCancel
+        guard confirmCancellationBeforeQuitting() else { return .terminateCancel }
+        downloadController.prepareToQuit()
+        mediaImportTask?.cancel()
+        return .terminateNow
     }
 
     private func confirmCancellationBeforeQuitting() -> Bool {
@@ -218,6 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         alert.addButton(withTitle: "Keep Downloading")
 
         guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        downloadController.prepareToQuit()
         downloadController.cancelCurrentDownload()
         return true
     }
@@ -328,8 +434,6 @@ private final class DockDownloadProgressView: NSView {
     }
 }
 
-/// Clear editing only when the click is outside a text input. Field-to-field
-/// clicks stay under AppKit's normal responder handling.
 @MainActor
 private final class MainInputWindow: NSWindow {
     override func sendEvent(_ event: NSEvent) {

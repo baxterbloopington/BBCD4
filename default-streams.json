@@ -1,148 +1,205 @@
 {
+  "templates": {
+    "worldwide-live-hd": {
+      "prefix": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:",
+      "suffix": "/hevc_iptv_hd_abr_v1.mpd",
+      "category": "liveStream"
+    },
+    "live-hls": {
+      "prefix": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:",
+      "suffix": "/t=3840/v=pv14/b=5070016/main.m3u8",
+      "category": "liveStream"
+    },
+    "uk-live-hd": {
+      "prefix": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:",
+      "suffix": "/hevc_iptv_hd_abr_v1.mpd",
+      "category": "liveStream"
+    },
+    "worldwide-tv": {
+      "prefix": "https://vs-hls-pushb-ww-live.akamaized.net/x=4/i=urn:bbc:pips:service:",
+      "suffix": "/t=3840/v=pv14/b=5070016/main.m3u8",
+      "category": "television"
+    },
+    "pop-up": {
+      "prefix": "https://vs-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:",
+      "suffix": "/t=3840/v=pv14/b=5070016/main.fmp4.m3u8",
+      "category": "liveStream"
+    },
+    "uhd-cloudfront": {
+      "prefix": "https://ve-uhd-push-uk.live.cf.md.bbci.co.uk/x=3/i=urn:bbc:pips:service:",
+      "suffix": "/iptv_uhd_v1.mpd",
+      "category": "liveStream"
+    },
+    "uhd-akamai": {
+      "prefix": "https://ve-uhd-push-uk-live.akamaized.net/x=4/i=urn:bbc:pips:service:",
+      "suffix": "/iptv_uhd_v1.mpd",
+      "category": "liveStream"
+    },
+    "uk-tv": {
+      "prefix": "https://vs-cmaf-push-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:",
+      "suffix": "/hevc_iptv_hd_abr_v1.mpd",
+      "category": "television"
+    },
+    "uk-tv-pushb": {
+      "prefix": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:",
+      "suffix": "/hevc_iptv_hd_abr_v1.mpd",
+      "category": "television"
+    },
+    "radio": {
+      "prefix": "https://lsn.lv/bbcradio.m3u8?station=bbc_",
+      "suffix": "&bitrate=320000",
+      "category": "radio"
+    },
+    "radio-dash": {
+      "prefix": "https://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/dash/uk/pc_hd_abr_v2/",
+      "suffix": ".mpd",
+      "category": "radio"
+    }
+  },
   "streams": {
     "ww 051 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_051/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_051"
     },
     "ww 051 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_051/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_051"
     },
     "ww 052 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_052/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_052"
     },
     "ww 052 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_052/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_052"
     },
     "ww 053 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_053/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_053"
     },
     "ww 053 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_053/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_053"
     },
     "ww 054 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_054/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_054"
     },
     "ww 054 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_054/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_054"
     },
     "ww 055 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_055/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_055"
     },
     "ww 055 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_055/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_055"
     },
     "ww 056 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_056/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_056"
     },
     "ww 056 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_056/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_056"
     },
     "ww 057 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_057/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_057"
     },
     "ww 057 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_057/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_057"
     },
     "ww 058 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_058/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_058"
     },
     "ww 058 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_058/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_058"
     },
     "ww 059 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_059/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_059"
     },
     "ww 059 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_059/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_059"
     },
     "uk 051 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_051/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_051"
     },
     "uk 051 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_051/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_051"
     },
     "uk 052 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_052/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_052"
     },
     "uk 052 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_052/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_052"
     },
     "uk 053 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_053/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_053"
     },
     "uk 053 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_053/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_053"
     },
     "uk 054 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_054/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_054"
     },
     "uk 054 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_054/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_054"
     },
     "uk 055 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_055/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_055"
     },
     "uk 055 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_055/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_055"
     },
     "uk 056 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_056/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_056"
     },
     "uk 056 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_056/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_056"
     },
     "uk 057 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_057/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_057"
     },
     "uk 057 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_057/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_057"
     },
     "uk 058 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_058/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_058"
     },
     "uk 058 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_058/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_058"
     },
     "BBC Afghan (720p)": {
-      "url": "https://vs-hls-pushb-ww-live.akamaized.net/x=4/i=urn:bbc:pips:service:bbc_afghan_tv/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "television"
+      "template": "worldwide-tv",
+      "id": "bbc_afghan_tv"
     },
     "BBC Arabic (720p)": {
-      "url": "https://vs-hls-pushb-ww-live.akamaized.net/x=4/i=urn:bbc:pips:service:bbc_arabic_tv/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "television"
+      "template": "worldwide-tv",
+      "id": "bbc_arabic_tv"
     },
     "BBC News North America": {
       "url": "https://vs-cmaf-pushb-ntham-gcomm.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_world_news_north_america/pc_hd_abr_v2.mpd",
@@ -153,764 +210,764 @@
       "category": "television"
     },
     "BBC Persian (720p)": {
-      "url": "https://vs-hls-pushb-ww-live.akamaized.net/x=4/i=urn:bbc:pips:service:bbc_persian_tv/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "television"
+      "template": "worldwide-tv",
+      "id": "bbc_persian_tv"
     },
     "World Service 05 (720p)": {
-      "url": "https://vs-hls-pushb-ww-live.akamaized.net/x=4/i=urn:bbc:pips:service:world_service_stream_05/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "television"
+      "template": "worldwide-tv",
+      "id": "world_service_stream_05"
     },
     "World Service 06 (720p)": {
-      "url": "https://vs-hls-pushb-ww-live.akamaized.net/x=4/i=urn:bbc:pips:service:world_service_stream_06/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "television"
+      "template": "worldwide-tv",
+      "id": "world_service_stream_06"
     },
     "World Service 07 (720p)": {
-      "url": "https://vs-hls-pushb-ww-live.akamaized.net/x=4/i=urn:bbc:pips:service:world_service_stream_07/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "television"
+      "template": "worldwide-tv",
+      "id": "world_service_stream_07"
     },
     "World Service 08 (720p)": {
-      "url": "https://vs-hls-pushb-ww-live.akamaized.net/x=4/i=urn:bbc:pips:service:world_service_stream_08/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "television"
+      "template": "worldwide-tv",
+      "id": "world_service_stream_08"
     },
     "Video Pop Up Channel 01 (720p)": {
-      "url": "https://vs-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:video_pop_up_channel_01/t=3840/v=pv14/b=5070016/main.fmp4.m3u8",
-      "category": "liveStream"
+      "template": "pop-up",
+      "id": "video_pop_up_channel_01"
     },
     "Video Pop Up Channel 02 (720p)": {
-      "url": "https://vs-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:video_pop_up_channel_02/t=3840/v=pv14/b=5070016/main.fmp4.m3u8",
-      "category": "liveStream"
+      "template": "pop-up",
+      "id": "video_pop_up_channel_02"
     },
     "Video Pop Up Channel 03 (720p)": {
-      "url": "https://vs-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:video_pop_up_channel_03/t=3840/v=pv14/b=5070016/main.fmp4.m3u8",
-      "category": "liveStream"
+      "template": "pop-up",
+      "id": "video_pop_up_channel_03"
     },
     "Video Pop Up Channel 04 (720p)": {
-      "url": "https://vs-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:video_pop_up_channel_04/t=3840/v=pv14/b=5070016/main.fmp4.m3u8",
-      "category": "liveStream"
+      "template": "pop-up",
+      "id": "video_pop_up_channel_04"
     },
     "Video Pop Up Channel 05 (720p)": {
-      "url": "https://vs-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:video_pop_up_channel_05/t=3840/v=pv14/b=5070016/main.fmp4.m3u8",
-      "category": "liveStream"
+      "template": "pop-up",
+      "id": "video_pop_up_channel_05"
     },
     "Video Pop Up Channel 06 (720p)": {
-      "url": "https://vs-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:video_pop_up_channel_06/t=3840/v=pv14/b=5070016/main.fmp4.m3u8",
-      "category": "liveStream"
+      "template": "pop-up",
+      "id": "video_pop_up_channel_06"
     },
     "Video Pop Up Channel 07 (720p)": {
-      "url": "https://vs-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:video_pop_up_channel_07/t=3840/v=pv14/b=5070016/main.fmp4.m3u8",
-      "category": "liveStream"
+      "template": "pop-up",
+      "id": "video_pop_up_channel_07"
     },
     "Video Pop Up Channel 08 (720p)": {
-      "url": "https://vs-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:video_pop_up_channel_08/t=3840/v=pv14/b=5070016/main.fmp4.m3u8",
-      "category": "liveStream"
+      "template": "pop-up",
+      "id": "video_pop_up_channel_08"
     },
     "Video Pop Up Channel 09 (720p)": {
-      "url": "https://vs-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:video_pop_up_channel_09/t=3840/v=pv14/b=5070016/main.fmp4.m3u8",
-      "category": "liveStream"
+      "template": "pop-up",
+      "id": "video_pop_up_channel_09"
     },
     "UHD 01": {
-      "url": "https://ve-uhd-push-uk.live.cf.md.bbci.co.uk/x=3/i=urn:bbc:pips:service:uhd_stream_01/iptv_uhd_v1.mpd",
-      "category": "liveStream"
+      "template": "uhd-cloudfront",
+      "id": "uhd_stream_01"
     },
     "UHD 02": {
-      "url": "https://ve-uhd-push-uk.live.cf.md.bbci.co.uk/x=3/i=urn:bbc:pips:service:uhd_stream_02/iptv_uhd_v1.mpd",
-      "category": "liveStream"
+      "template": "uhd-cloudfront",
+      "id": "uhd_stream_02"
     },
     "UHD 05": {
-      "url": "https://ve-uhd-push-uk.live.cf.md.bbci.co.uk/x=3/i=urn:bbc:pips:service:uhd_stream_05/iptv_uhd_v1.mpd",
-      "category": "liveStream"
+      "template": "uhd-cloudfront",
+      "id": "uhd_stream_05"
     },
     "ww 001 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_001/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_001"
     },
     "ww 001 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_001/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_001"
     },
     "ww 002 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_002/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_002"
     },
     "ww 002 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_002/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_002"
     },
     "ww 060 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_060/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_060"
     },
     "ww 060 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_060/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_060"
     },
     "ww 061 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_061/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_061"
     },
     "ww 061 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_061/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_061"
     },
     "ww 062 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_062/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_062"
     },
     "ww 062 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_062/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_062"
     },
     "ww 063 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_063/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_063"
     },
     "ww 063 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_063/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_063"
     },
     "ww 064 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_064/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_064"
     },
     "ww 064 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_064/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_064"
     },
     "ww 065 (1080p)": {
-      "url": "https://ve-cmaf-pushb-ww.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_065/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "worldwide-live-hd",
+      "id": "ww_bbc_stream_065"
     },
     "ww 065 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:ww_bbc_stream_065/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "ww_bbc_stream_065"
     },
     "uk 001 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_001/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_001"
     },
     "uk 001 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_001/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_001"
     },
     "uk 002 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_002/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_002"
     },
     "uk 002 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_002/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_002"
     },
     "uk 003 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_003/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_003"
     },
     "uk 003 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_003/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_003"
     },
     "uk 004 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_004/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_004"
     },
     "uk 004 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_004/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_004"
     },
     "uk 005 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_005/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_005"
     },
     "uk 005 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_005/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_005"
     },
     "uk 006 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_006/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_006"
     },
     "uk 006 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_006/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_006"
     },
     "uk 007 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_007/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_007"
     },
     "uk 007 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_007/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_007"
     },
     "uk 008 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_008/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_008"
     },
     "uk 008 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_008/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_008"
     },
     "uk 009 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_009/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_009"
     },
     "uk 009 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_009/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_009"
     },
     "uk 010 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_010/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_010"
     },
     "uk 010 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_010/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_010"
     },
     "uk 011 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_011/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_011"
     },
     "uk 011 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_011/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_011"
     },
     "uk 012 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_012/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_012"
     },
     "uk 012 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_012/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_012"
     },
     "uk 013 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_013/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_013"
     },
     "uk 013 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_013/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_013"
     },
     "uk 014 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_014/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_014"
     },
     "uk 014 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_014/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_014"
     },
     "uk 015 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_015/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_015"
     },
     "uk 015 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_015/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_015"
     },
     "uk 016 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_016/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_016"
     },
     "uk 016 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_016/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_016"
     },
     "uk 017 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_017/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_017"
     },
     "uk 017 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_017/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_017"
     },
     "uk 018 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_018/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_018"
     },
     "uk 018 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_018/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_018"
     },
     "uk 019 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_019/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_019"
     },
     "uk 019 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_019/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_019"
     },
     "uk 020 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_020/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_020"
     },
     "uk 020 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_020/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_020"
     },
     "uk 021 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_021/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_021"
     },
     "uk 021 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_021/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_021"
     },
     "uk 022 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_022/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_022"
     },
     "uk 022 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_022/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_022"
     },
     "uk 023 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_023/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_023"
     },
     "uk 023 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_023/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_023"
     },
     "uk 041 (4K/UHD)": {
-      "url": "https://ve-uhd-push-uk-live.akamaized.net/x=4/i=urn:bbc:pips:service:uk_bbc_stream_041/iptv_uhd_v1.mpd",
-      "category": "liveStream"
+      "template": "uhd-akamai",
+      "id": "uk_bbc_stream_041"
     },
     "uk 042 (4K/UHD)": {
-      "url": "https://ve-uhd-push-uk-live.akamaized.net/x=4/i=urn:bbc:pips:service:uk_bbc_stream_042/iptv_uhd_v1.mpd",
-      "category": "liveStream"
+      "template": "uhd-akamai",
+      "id": "uk_bbc_stream_042"
     },
     "uk 043 (4K/UHD)": {
-      "url": "https://ve-uhd-push-uk-live.akamaized.net/x=4/i=urn:bbc:pips:service:uk_bbc_stream_043/iptv_uhd_v1.mpd",
-      "category": "liveStream"
+      "template": "uhd-akamai",
+      "id": "uk_bbc_stream_043"
     },
     "uk 044 (4K/UHD)": {
-      "url": "https://ve-uhd-push-uk-live.akamaized.net/x=4/i=urn:bbc:pips:service:uk_bbc_stream_044/iptv_uhd_v1.mpd",
-      "category": "liveStream"
+      "template": "uhd-akamai",
+      "id": "uk_bbc_stream_044"
     },
     "uk 064 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_064/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_064"
     },
     "uk 064 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_064/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_064"
     },
     "uk 069 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_069/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_069"
     },
     "uk 069 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_069/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_069"
     },
     "uk 070 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_070/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_070"
     },
     "uk 070 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_070/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_070"
     },
     "uk 071 (1080p)": {
-      "url": "https://ve-cmaf-pushb-uk.live.fastly.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_071/hevc_iptv_hd_abr_v1.mpd",
-      "category": "liveStream"
+      "template": "uk-live-hd",
+      "id": "uk_bbc_stream_071"
     },
     "uk 071 (720p)": {
-      "url": "https://pub-m1-enhmi-sky.live.bidi.net.uk/ve-hls-pushb-uk/x=4/i=urn:bbc:pips:service:uk_bbc_stream_071/t=3840/v=pv14/b=5070016/main.m3u8",
-      "category": "liveStream"
+      "template": "live-hls",
+      "id": "uk_bbc_stream_071"
     },
     "BBC One London HD": {
-      "url": "https://vs-cmaf-push-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_london/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv",
+      "id": "bbc_one_london"
     },
     "BBC One Wales HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_wales_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_wales_hd"
     },
     "BBC One Scotland HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_scotland_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_scotland_hd"
     },
     "BBC One Northern Ireland HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_northern_ireland_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_northern_ireland_hd"
     },
     "BBC One Channel Islands HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_channel_islands/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_channel_islands"
     },
     "BBC One East HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_east/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_east"
     },
     "BBC One East Midlands HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_east_midlands/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_east_midlands"
     },
     "BBC One East Yorkshire & Lincolnshire HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_east_yorkshire/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_east_yorkshire"
     },
     "BBC One North East HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_north_east/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_north_east"
     },
     "BBC One North West HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_north_west/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_north_west"
     },
     "BBC One South HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_south/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_south"
     },
     "BBC One South East HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_south_east/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_south_east"
     },
     "BBC One South West HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_south_west/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_south_west"
     },
     "BBC One West HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_west/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_west"
     },
     "BBC One West Midlands HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_west_midlands/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_west_midlands"
     },
     "BBC One Yorkshire HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_one_yorks/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_one_yorks"
     },
     "BBC Two HD": {
-      "url": "https://vs-cmaf-push-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_two_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv",
+      "id": "bbc_two_hd"
     },
     "BBC Two Northern Ireland HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_two_northern_ireland_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_two_northern_ireland_hd"
     },
     "BBC Two Wales Digital": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_two_wales_digital/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_two_wales_digital"
     },
     "BBC Three HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_three_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_three_hd"
     },
     "BBC Four HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_four_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_four_hd"
     },
     "CBBC HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:cbbc_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "cbbc_hd"
     },
     "CBeebies HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:cbeebies_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "cbeebies_hd"
     },
     "BBC Scotland HD": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_scotland_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_scotland_hd"
     },
     "BBC News Channel HD": {
-      "url": "https://vs-cmaf-push-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_news_channel_hd/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv",
+      "id": "bbc_news_channel_hd"
     },
     "BBC Parliament": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_parliament/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_parliament"
     },
     "BBC Alba": {
-      "url": "https://vs-cmaf-pushb-uk.live.cf.md.bbci.co.uk/x=4/i=urn:bbc:pips:service:bbc_alba/hevc_iptv_hd_abr_v1.mpd",
-      "category": "television"
+      "template": "uk-tv-pushb",
+      "id": "bbc_alba"
     },
     "S4C (720p)": {
       "url": "https://vs-cmaf-pushb-uk-live.akamaized.net/x=4/i=urn:bbc:pips:service:s4cpbs/pc_hd_abr_v2.mpd",
       "category": "television"
     },
     "BBC World Service": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_world_service&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "world_service"
     },
     "BBC Radio 1Xtra": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_1xtra&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "1xtra"
     },
     "BBC Radio 1": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_one&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_one"
     },
     "BBC Radio 1 Dance": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_one_dance&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_one_dance"
     },
     "BBC Radio 2": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_two&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_two"
     },
     "BBC Radio 3": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_three&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_three"
     },
     "BBC Radio 4": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_fourfm&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_fourfm"
     },
     "BBC Radio 4 Extra": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_four_extra&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_four_extra"
     },
     "BBC Radio 5 Live": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_five_live&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_five_live"
     },
     "BBC Radio 6 Music": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_6music&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "6music"
     },
     "BBC Radio Asian Network": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_asian_network&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "asian_network"
     },
     "BBC Radio Berkshire": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_berkshire&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_berkshire"
     },
     "BBC Radio Bristol": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_bristol&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_bristol"
     },
     "BBC Radio Cambridge": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_cambridge&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_cambridge"
     },
     "BBC Radio Cornwall": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_cornwall&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_cornwall"
     },
     "BBC Radio Coventry and Warwickshire": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_coventry_warwickshire&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_coventry_warwickshire"
     },
     "BBC Radio Cumbria": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_cumbria&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_cumbria"
     },
     "BBC Radio Cymru": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_cymru&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_cymru"
     },
     "BBC Radio Cymru 2": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_cymru_2&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_cymru_2"
     },
     "BBC Radio Derby": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_derby&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_derby"
     },
     "BBC Radio Devon": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_devon&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_devon"
     },
     "BBC Radio Essex": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_essex&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_essex"
     },
     "BBC Radio Foyle": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_foyle&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_foyle"
     },
     "BBC Radio Hereford & Worcester": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_hereford_worcester&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_hereford_worcester"
     },
     "BBC Radio Gloucestershire": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_gloucestershire&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_gloucestershire"
     },
     "BBC Radio Guernsey": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_guernsey&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_guernsey"
     },
     "BBC Radio Humberside": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_humberside&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_humberside"
     },
     "BBC Radio Jersey": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_jersey&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_jersey"
     },
     "BBC Radio Kent": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_kent&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_kent"
     },
     "BBC Radio Lancashire": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_lancashire&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_lancashire"
     },
     "BBC Radio Leeds": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_leeds&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_leeds"
     },
     "BBC Radio Leicester": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_leicester&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_leicester"
     },
     "BBC Radio Lincolnshire": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_lincolnshire&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_lincolnshire"
     },
     "BBC Radio London": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_london&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "london"
     },
     "BBC Radio Manchester": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_manchester&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_manchester"
     },
     "BBC Radio Merseyside": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_merseyside&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_merseyside"
     },
     "BBC Radio nan Gaidheal": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_nan_gaidheal&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_nan_gaidheal"
     },
     "BBC Radio Newcastle": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_newcastle&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_newcastle"
     },
     "BBC Radio Norfolk": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_norfolk&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_norfolk"
     },
     "BBC Radio Northampton": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_northampton&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_northampton"
     },
     "BBC Radio Nottingham": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_nottingham&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_nottingham"
     },
     "BBC Radio Orkney": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_orkney&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_orkney"
     },
     "BBC Radio Oxford": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_oxford&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_oxford"
     },
     "BBC Radio Scotland": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_scotland_fm&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_scotland_fm"
     },
     "BBC Radio Scotland Extra": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_scotland_mw&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_scotland_mw"
     },
     "BBC Radio Sheffield": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_sheffield&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_sheffield"
     },
     "BBC Radio Shetland": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_shetland&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_shetland"
     },
     "BBC Radio Shropshire": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_shropshire&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_shropshire"
     },
     "BBC Radio Solent": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_solent&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_solent"
     },
     "BBC Radio Solent West Dorset": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_solent_west_dorset&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_solent_west_dorset"
     },
     "BBC Radio Somerset Sound": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_somerset_sound&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_somerset_sound"
     },
     "BBC Radio Stoke": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_stoke&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_stoke"
     },
     "BBC Radio Suffolk": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_suffolk&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_suffolk"
     },
     "BBC Radio Surrey": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_surrey&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_surrey"
     },
     "BBC Radio Sussex": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_sussex&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_sussex"
     },
     "BBC Radio Tees": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_tees&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "tees"
     },
     "BBC Radio Ulster": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_ulster&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_ulster"
     },
     "BBC Radio Wales": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_wales_fm&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_wales_fm"
     },
     "BBC Radio West Midlands": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_wm&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "wm"
     },
     "BBC Radio Wiltshire": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_wiltshire&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_wiltshire"
     },
     "BBC Radio York": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_york&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_york"
     },
     "BBC Three Counties Radio": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_three_counties_radio&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "three_counties_radio"
     },
     "BBC Radio 1 Anthems": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_one_anthems&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_one_anthems"
     },
     "BBC Radio 6 Music Indie Forever": {
-      "url": "https://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/dash/uk/pc_hd_abr_v2/cfs/bbc_radio_six_indie_forever.mpd",
-      "category": "radio"
+      "template": "radio-dash",
+      "id": "cfs/bbc_radio_six_indie_forever"
     },
     "BBC Radio 3 Unwind": {
-      "url": "https://lsn.lv/bbcradio.m3u8?station=bbc_radio_three_unwind&bitrate=320000",
-      "category": "radio"
+      "template": "radio",
+      "id": "radio_three_unwind"
     },
     "BBC Radio 5 Live Sports Extra": {
-      "url": "https://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/dash/uk/pc_hd_abr_v2/cfs/bbc_radio_five_live_sports_extra.mpd",
-      "category": "radio"
+      "template": "radio-dash",
+      "id": "cfs/bbc_radio_five_live_sports_extra"
     },
     "BBC Radio 5 Live Sports Extra 2": {
-      "url": "https://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/dash/uk/pc_hd_abr_v2/cfs/bbc_radio_five_sports_extra_2.mpd",
-      "category": "radio"
+      "template": "radio-dash",
+      "id": "cfs/bbc_radio_five_sports_extra_2"
     },
     "BBC Radio 5 Live Sports Extra 3": {
-      "url": "https://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/dash/uk/pc_hd_abr_v2/cfs/bbc_radio_five_sports_extra_3.mpd",
-      "category": "radio"
+      "template": "radio-dash",
+      "id": "cfs/bbc_radio_five_sports_extra_3"
     },
     "BBC Sounds News": {
-      "url": "https://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/dash/uk/pc_hd_abr_v2/cfs/bbc_sounds_news.mpd",
-      "category": "radio"
+      "template": "radio-dash",
+      "id": "cfs/bbc_sounds_news"
     },
     "BBC Radio Wales Extra": {
-      "url": "https://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/dash/uk/pc_hd_abr_v2/cfs/bbc_radio_wales_am.mpd",
-      "category": "radio"
+      "template": "radio-dash",
+      "id": "cfs/bbc_radio_wales_am"
     },
     "CBeebies Radio": {
-      "url": "https://a.files.bbci.co.uk/ms6/live/3441A116-B12E-4D2F-ACA8-C1984642FA4B/audio/simulcast/dash/uk/pc_hd_abr_v2/aks/cbeebies_radio.mpd",
-      "category": "radio"
+      "template": "radio-dash",
+      "id": "aks/cbeebies_radio"
     }
   },
   "order": [

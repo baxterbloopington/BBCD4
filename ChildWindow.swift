@@ -2,6 +2,30 @@ import AppKit
 import SwiftUI
 
 @MainActor
+class EditingWindow: NSWindow {
+    var contentUndoManager: UndoManager?
+    override var undoManager: UndoManager? {
+        if firstResponder is NSTextView || firstResponder is NSTextField { return super.undoManager }
+        return contentUndoManager ?? super.undoManager
+    }
+
+    @objc(undo:) func undoContent(_ sender: Any?) { undoManager?.undo() }
+    @objc(redo:) func redoContent(_ sender: Any?) { undoManager?.redo() }
+
+    override func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(undoContent(_:)) {
+            menuItem.title = undoManager?.undoMenuItemTitle ?? "Undo"
+            return undoManager?.canUndo == true
+        }
+        if menuItem.action == #selector(redoContent(_:)) {
+            menuItem.title = undoManager?.redoMenuItemTitle ?? "Redo"
+            return undoManager?.canRedo == true
+        }
+        return super.validateMenuItem(menuItem)
+    }
+}
+
+@MainActor
 func closeSecondaryWindow() {
     NSApp.keyWindow?.close()
 }
@@ -87,6 +111,7 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
     let title: String
     let contentSize: NSSize
     let showsWindowTitle: Bool
+    let undoManager: UndoManager?
     let windowContent: () -> WindowContent
 
     func makeCoordinator() -> Coordinator {
@@ -102,7 +127,7 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
 
         if isPresented {
             if context.coordinator.window == nil {
-                let window = NSWindow(
+                let window = EditingWindow(
                     contentRect: NSRect(origin: .zero, size: contentSize),
                     styleMask: [.titled, .closable, .miniaturizable],
                     backing: .buffered,
@@ -115,6 +140,7 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
                 window.standardWindowButton(.zoomButton)?.isHidden = true
                 window.isReleasedWhenClosed = false
                 window.delegate = context.coordinator
+                window.contentUndoManager = undoManager
 
                 window.contentViewController = NSHostingController(rootView: windowContent())
                 window.appearance = NSApp.appearance
@@ -180,6 +206,7 @@ extension View {
         title: String,
         size: NSSize,
         showsWindowTitle: Bool = false,
+        undoManager: UndoManager? = nil,
         @ViewBuilder content: @escaping () -> WindowContent
     ) -> some View {
         background(
@@ -188,9 +215,83 @@ extension View {
                 title: title,
                 contentSize: size,
                 showsWindowTitle: showsWindowTitle,
+                undoManager: undoManager,
                 windowContent: content
             )
             .frame(width: 0, height: 0)
         )
+    }
+}
+
+var isTextInputOrMenuActive: Bool {
+    MainActor.assumeIsolated {
+        guard let responder = NSApp.keyWindow?.firstResponder else { return false }
+        return responder is NSTextView
+            || responder is NSTextField
+            || responder is NSComboBox
+            || responder is NSPopUpButton
+    }
+}
+
+@MainActor
+func makeShortcutEventMonitor(
+    isFocused: @escaping @MainActor () -> Bool,
+    closesOnReturn: Bool = false,
+    handle: @escaping @MainActor (AppShortcut) -> Bool
+) -> Any? {
+    NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        let handled = MainActor.assumeIsolated {
+            guard isFocused() else { return false }
+            let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if closesOnReturn, [36, 76].contains(event.keyCode), modifiers.isEmpty, !isTextInputOrMenuActive {
+                closeSecondaryWindow()
+                return true
+            }
+            guard let shortcut = AppShortcut(event: event) else { return false }
+            return handle(shortcut)
+        }
+        return handled ? nil : event
+    }
+}
+
+func makePrimaryActionEventMonitor(
+    for windowTitle: String,
+    action: @escaping () -> Void
+) -> Any? {
+    NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        guard [36, 76].contains(event.keyCode),
+              modifiers.isEmpty,
+              isSecondaryWindowFocused(title: windowTitle),
+              !isTextInputOrMenuActive else {
+            return event
+        }
+
+        action()
+        return nil
+    }
+}
+
+func removeEventMonitor(_ monitor: Any?) {
+    if let monitor {
+        NSEvent.removeMonitor(monitor)
+    }
+}
+
+struct InitialKeyboardFocusReset: NSViewRepresentable {
+    func makeNSView(context: Context) -> ResetView { ResetView() }
+
+    func updateNSView(_ view: ResetView, context: Context) {}
+
+    final class ResetView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            window.initialFirstResponder = nil
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window, self.window === window else { return }
+                window.makeFirstResponder(nil)
+            }
+        }
     }
 }

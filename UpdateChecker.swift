@@ -1,7 +1,7 @@
 import Foundation
 
 private enum AppVersion {
-    static let releaseVersion = "3.9"
+    static let releaseVersion = "5.0"
     static let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? releaseVersion
 }
 
@@ -44,7 +44,11 @@ enum UpdateCheckFrequency: String, CaseIterable {
 
 @MainActor
 final class UpdateChecker: ObservableObject {
+    enum CheckResult: Equatable {
+        case available, upToDate, busy, cancelled, failed(String)
+    }
     @Published private(set) var release: AvailableRelease?
+    @Published private(set) var isChecking = false
     private let fetch: @Sendable (URLRequest) async throws -> (Data, URLResponse)
     private let sleep: @Sendable (Duration) async throws -> Void
     private let currentVersion: String
@@ -69,7 +73,11 @@ final class UpdateChecker: ObservableObject {
             repeat {
                 try Task.checkCancellation()
                 guard self.generation == generation else { return }
-                await check(generation: generation)
+                while isChecking {
+                    try await Task.sleep(for: .milliseconds(50))
+                    guard self.generation == generation else { return }
+                }
+                _ = await check(generation: generation)
                 try Task.checkCancellation()
                 guard self.generation == generation else { return }
                 guard let interval = frequency.interval else { return }
@@ -78,36 +86,44 @@ final class UpdateChecker: ObservableObject {
         } catch {}
     }
 
-    private func check(generation: UUID) async {
-        guard Date() >= retryNotBefore else { return }
+    func checkNow() async -> CheckResult { await check(generation: generation) }
+
+    private func check(generation: UUID) async -> CheckResult {
+        guard !isChecking else { return .busy }
+        guard Date() >= retryNotBefore else { return .failed("The update service is busy. Please try again later.") }
         guard let url = URL(string: "https://api.github.com/repos/baxterbloopington/BBCD4/releases/latest") else {
-            return
+            return .failed("The update service could not be reached.")
         }
+        isChecking = true
+        defer { isChecking = false }
         do {
             var request = URLRequest(url: url, timeoutInterval: 15)
             request.setValue("BBCD4", forHTTPHeaderField: "User-Agent")
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
             let (data, response) = try await fetch(request)
             try Task.checkCancellation()
-            guard self.generation == generation, let response = response as? HTTPURLResponse else { return }
+            guard self.generation == generation else { return .cancelled }
+            guard let response = response as? HTTPURLResponse else { return .failed("The update service returned an invalid response.") }
             if response.statusCode == 403 || response.statusCode == 429 {
                 let retryDelay = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init) ?? 60
                 let reset = response.value(forHTTPHeaderField: "x-ratelimit-reset").flatMap(Double.init) ?? 0
                 retryNotBefore = max(Date().addingTimeInterval(max(60, retryDelay)), Date(timeIntervalSince1970: reset))
             }
-            guard response.statusCode == 200 else { return }
+            guard response.statusCode == 200 else { return .failed("Updates could not be checked. Please try again later.") }
             let payload = try JSONDecoder().decode(ReleasePayload.self, from: data)
             let version = payload.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
             guard isNewer(version, than: currentVersion), let releaseURL = URL(string: payload.htmlURL) else {
                 release = nil
-                return
+                return .upToDate
             }
             release = AvailableRelease(
                 version: version,
                 url: releaseURL,
                 notes: payload.body?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             )
-        } catch {}
+            return .available
+        } catch is CancellationError { return .cancelled }
+        catch { return .failed(error.localizedDescription) }
     }
 
     private func isNewer(_ candidate: String, than current: String) -> Bool {

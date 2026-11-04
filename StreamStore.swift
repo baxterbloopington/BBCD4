@@ -82,27 +82,19 @@ struct StreamGroupSection: Identifiable, Sendable {
 }
 
 enum StreamGrouping {
+    static func firstStream(in streams: [Stream], groups: [StreamGroup]) -> Stream? {
+        sections(for: streams, groups: groups).first?.streams.first
+    }
+
     static func searchSections(for streams: [Stream], groups: [StreamGroup], query: String) -> [StreamGroupSection] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return sections(for: streams, groups: groups, includeEmptyGroups: true) }
-        let membersByGroup = Dictionary(grouping: streams, by: \.groupID)
-        var result = groups.compactMap { group -> StreamGroupSection? in
-            let matchesGroup = group.name.localizedCaseInsensitiveContains(query)
-            let members = (membersByGroup[group.id] ?? []).filter {
-                matchesGroup || $0.name.localizedCaseInsensitiveContains(query)
-            }
-            guard matchesGroup || !members.isEmpty else { return nil }
-            return StreamGroupSection(id: group.id, title: group.name, streams: members)
+        return sections(for: streams, groups: groups, includeEmptyGroups: true).compactMap { section in
+            if section.title?.localizedCaseInsensitiveContains(query) == true { return section }
+            let matches = section.streams.filter { $0.name.localizedCaseInsensitiveContains(query) }
+            guard !matches.isEmpty else { return nil }
+            return StreamGroupSection(id: section.id, title: section.title, streams: matches)
         }
-        let ids = Set(groups.map(\.id))
-        let matchesUngrouped = !groups.isEmpty && "Ungrouped".localizedCaseInsensitiveContains(query)
-        let ungrouped = streams.filter {
-            ($0.groupID.map { !ids.contains($0) } ?? true) && (matchesUngrouped || $0.name.localizedCaseInsensitiveContains(query))
-        }
-        if !ungrouped.isEmpty || matchesUngrouped {
-            result.append(StreamGroupSection(id: nil, title: groups.isEmpty ? nil : "Ungrouped", streams: ungrouped))
-        }
-        return result
     }
 
     static func sections(for streams: [Stream], groups: [StreamGroup], includeEmptyGroups: Bool = false) -> [StreamGroupSection] {
@@ -144,13 +136,14 @@ enum StreamAvailabilityPreferences {
 }
 
 enum StreamAvailabilityState: Sendable {
-    case unknown, online, offline
+    case unknown, online, offline, checkFailed
 
     var title: String {
         switch self {
         case .unknown: "Not checked yet"
         case .online: "Online"
-        case .offline: "Offline or unreachable"
+        case .offline: "Inactive"
+        case .checkFailed: "Couldn’t check"
         }
     }
 }
@@ -270,8 +263,7 @@ final class StreamAvailabilityMonitor: ObservableObject {
         while !Task.isCancelled, self.generation == generation {
             await scan(schedule.urls, generation: generation)
             guard !Task.isCancelled, self.generation == generation else { return }
-            // Skip missed ticks instead of overlapping scans or immediately
-            // starting another large scan after a slow network response.
+
             repeat { nextScan += .seconds(schedule.interval) } while nextScan <= clock.now
             do { try await clock.sleep(until: nextScan) } catch { return }
         }
@@ -304,7 +296,10 @@ final class StreamAvailabilityMonitor: ObservableObject {
                         return (url, StreamAvailabilityResult(state: available ? .online : .offline, checkedAt: Date()))
                     } catch {
                         guard !Task.isCancelled, !(error is CancellationError) else { return (url, nil) }
-                        return (url, StreamAvailabilityResult(state: .offline, checkedAt: Date()))
+                        let state: StreamAvailabilityState
+                        if case DownloadError.httpStatus(let code, _) = error, [404, 410].contains(code) { state = .offline }
+                        else { state = .checkFailed }
+                        return (url, StreamAvailabilityResult(state: state, checkedAt: Date()))
                     }
                 }
             }
@@ -319,6 +314,49 @@ final class StreamAvailabilityMonitor: ObservableObject {
                 enqueueNext()
             }
         }
+    }
+}
+
+struct DefaultStreamCatalog: Decodable {
+    struct Entry {
+        let url: String
+        let category: StreamCategory
+    }
+
+    let streams: [String: Entry]
+    let order: [String]?
+
+    private struct Template: Decodable {
+        let prefix: String
+        let suffix: String
+        let category: StreamCategory
+    }
+
+    private struct Definition: Decodable {
+        let url: String?
+        let template: String?
+        let id: String?
+        let category: StreamCategory?
+    }
+
+    private enum CodingKeys: String, CodingKey { case templates, streams, order }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let templates = try container.decodeIfPresent([String: Template].self, forKey: .templates) ?? [:]
+        let entries = try container.decode([String: Definition].self, forKey: .streams)
+        streams = try entries.mapValues { entry in
+            if let url = entry.url {
+                return Entry(url: url, category: entry.category ?? StreamCategory.inferred(from: url))
+            }
+            guard let key = entry.template, let template = templates[key], let id = entry.id, !id.isEmpty else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .streams, in: container, debugDescription: "Missing stream URL or valid template and identifier."
+                )
+            }
+            return Entry(url: template.prefix + id + template.suffix, category: entry.category ?? template.category)
+        }
+        order = try container.decodeIfPresent([String].self, forKey: .order)
     }
 }
 
@@ -387,13 +425,28 @@ private struct StoredStreams: Codable {
 final class StreamStore: ObservableObject {
     @Published private(set) var streams: [Stream] = []
     @Published private(set) var groups: [StreamGroup] = []
-    @Published var selectedStreamID: String?
+    @Published var selectedStreamID: String? {
+        didSet {
+            if let savedSnapshot, savedSnapshot.streams == streams, savedSnapshot.groups == groups {
+                self.savedSnapshot = snapshot
+            }
+        }
+    }
 
     private let fileManager = FileManager.default
     private let orderDefaultsKey = "BBCD4Mac.streamOrder"
     private let storageURL: URL
     private let defaults: UserDefaults
     private var recoveryData: Data?
+    private struct Snapshot: Equatable {
+        let streams: [Stream]
+        let groups: [StreamGroup]
+        let selection: String?
+    }
+    private let history = EditHistory<Snapshot>()
+    private var savedSnapshot: Snapshot?
+    var undoManager: UndoManager { history.undoManager }
+    private var snapshot: Snapshot { Snapshot(streams: streams, groups: groups, selection: selectedStreamID) }
 
     init(storageURL: URL? = nil, defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -401,6 +454,7 @@ final class StreamStore: ObservableObject {
             .appendingPathComponent("BBCD4 Mac", isDirectory: true)
             .appendingPathComponent("streams.json")
         load()
+        savedSnapshot = snapshot
     }
 
     var selectedStream: Stream? {
@@ -409,49 +463,17 @@ final class StreamStore: ObservableObject {
 
     func add(name: String, url: String, category: StreamCategory, groupID: UUID? = nil) throws {
         try validateGroup(groupID)
-        let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !cleanedName.isEmpty, !cleanedURL.isEmpty else {
-            throw StreamError.missingDetails
-        }
-        guard Self.isSupportedURL(cleanedURL) else {
-            throw StreamError.invalidURL
-        }
-        guard !streams.contains(where: { $0.name.caseInsensitiveCompare(cleanedName) == .orderedSame }) else {
-            throw StreamError.duplicateName
-        }
-        guard !streams.contains(where: { $0.url == cleanedURL }) else {
-            throw StreamError.duplicateURL
-        }
+        let (cleanedName, cleanedURL) = try validatedDetails(name: name, url: url)
 
         streams.append(Stream(name: cleanedName, url: cleanedURL, category: category, groupID: groupID))
         selectedStreamID = cleanedName
-        save()
+        save(action: "Add stream")
     }
 
     func update(originalName: String, name: String, url: String, category: StreamCategory, groupID: UUID?) throws {
         try validateGroup(groupID)
         guard let index = streams.firstIndex(where: { $0.name == originalName }) else { return }
-        let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !cleanedName.isEmpty, !cleanedURL.isEmpty else {
-            throw StreamError.missingDetails
-        }
-        guard Self.isSupportedURL(cleanedURL) else {
-            throw StreamError.invalidURL
-        }
-        guard !streams.enumerated().contains(where: {
-            $0.offset != index && $0.element.name.caseInsensitiveCompare(cleanedName) == .orderedSame
-        }) else {
-            throw StreamError.duplicateName
-        }
-        guard !streams.enumerated().contains(where: {
-            $0.offset != index && $0.element.url == cleanedURL
-        }) else {
-            throw StreamError.duplicateURL
-        }
+        let (cleanedName, cleanedURL) = try validatedDetails(name: name, url: url, excluding: index)
 
         streams[index] = Stream(
             name: cleanedName,
@@ -461,22 +483,36 @@ final class StreamStore: ObservableObject {
             groupID: groupID
         )
         selectedStreamID = cleanedName
-        save()
+        save(action: "Edit stream")
+    }
+
+    private func validatedDetails(name: String, url: String, excluding index: Int? = nil) throws -> (String, String) {
+        let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanedName.isEmpty, !cleanedURL.isEmpty else { throw StreamError.missingDetails }
+        guard Self.isSupportedURL(cleanedURL) else { throw StreamError.invalidURL }
+        guard !streams.enumerated().contains(where: {
+            $0.offset != index && $0.element.name.caseInsensitiveCompare(cleanedName) == .orderedSame
+        }) else { throw StreamError.duplicateName }
+        guard !streams.enumerated().contains(where: {
+            $0.offset != index && $0.element.url == cleanedURL
+        }) else { throw StreamError.duplicateURL }
+        return (cleanedName, cleanedURL)
     }
 
     func setCategory(_ category: StreamCategory, for ids: Set<String>) {
-        updateStreams(ids) { $0.category = category }
+        updateStreams(ids, action: "Change stream type") { $0.category = category }
     }
 
     func setFavourite(_ favourite: Bool, for ids: Set<String>) {
-        updateStreams(ids) { $0.isFavourite = favourite }
+        updateStreams(ids, action: "Change favourites") { $0.isFavourite = favourite }
     }
 
     @discardableResult
     func addGroup(name: String) throws -> UUID {
         let group = StreamGroup(name: try StreamGroup.validatedName(name, in: groups))
         groups.append(group)
-        save()
+        save(action: "Create group")
         return group.id
     }
 
@@ -485,7 +521,7 @@ final class StreamStore: ObservableObject {
         let validatedName = try StreamGroup.validatedName(name, in: groups, excluding: id)
         guard groups[index].name != validatedName else { return }
         groups[index].name = validatedName
-        save()
+        save(action: "Rename group")
     }
 
     func deleteGroup(_ id: UUID) {
@@ -500,12 +536,12 @@ final class StreamStore: ObservableObject {
             if let groupID = updated[index].groupID, ids.contains(groupID) { updated[index].groupID = nil }
         }
         if updated != streams { streams = updated }
-        save()
+        save(action: "Delete groups")
     }
 
     func moveGroups(fromOffsets source: IndexSet, toOffset destination: Int) {
         groups.move(fromOffsets: source, toOffset: destination)
-        save()
+        save(action: "Move groups")
     }
 
     @discardableResult
@@ -554,21 +590,21 @@ final class StreamStore: ObservableObject {
         reordered.insert(contentsOf: assigned, at: destination)
         guard reordered != streams else { return false }
         streams = reordered
-        save()
+        save(action: "Move streams")
         return true
     }
 
     func setGroup(_ groupID: UUID?, for streamIDs: Set<String>) throws {
         try validateGroup(groupID)
-        updateStreams(streamIDs) { $0.groupID = groupID }
+        updateStreams(streamIDs, action: "Change stream group") { $0.groupID = groupID }
     }
 
-    private func updateStreams(_ ids: Set<String>, change: (inout Stream) -> Void) {
+    private func updateStreams(_ ids: Set<String>, action: String, change: (inout Stream) -> Void) {
         var updated = streams
         for index in updated.indices where ids.contains(updated[index].id) { change(&updated[index]) }
         guard updated != streams else { return }
         streams = updated
-        save()
+        save(action: action)
     }
 
     private func validateGroup(_ id: UUID?) throws {
@@ -582,7 +618,7 @@ final class StreamStore: ObservableObject {
         if let selectedStreamID, ids.contains(selectedStreamID) {
             self.selectedStreamID = streams.isEmpty ? nil : streams[min(index, streams.count - 1)].id
         }
-        save()
+        save(action: "Delete streams")
     }
 
     func resetToDefaults() {
@@ -596,8 +632,8 @@ final class StreamStore: ObservableObject {
                 isFavourite: $0.isFavourite
             ) }
         }
-        selectedStreamID = streams.first?.id
-        save()
+        selectedStreamID = StreamGrouping.firstStream(in: streams, groups: groups)?.id
+        save(action: "Restore default streams")
     }
 
     private func load() {
@@ -631,10 +667,21 @@ final class StreamStore: ObservableObject {
                 groupID: entry.groupID.flatMap { groupIDs.contains($0) ? $0 : nil }
             ) }
         }
-        selectedStreamID = streams.first?.id
+        selectedStreamID = StreamGrouping.firstStream(in: streams, groups: groups)?.id
     }
 
-    private func save() {
+    private func save(action: String? = nil) {
+        let current = snapshot
+        if let action, let previous = savedSnapshot {
+            history.record(previous, current: current, name: action) { [weak self] state in
+                guard let self else { return }
+                self.groups = state.groups
+                self.streams = state.streams
+                self.selectedStreamID = state.selection
+                self.save()
+            }
+        }
+        savedSnapshot = current
         defaults.set(streams.map(\.name), forKey: orderDefaultsKey)
         let stored = StoredStreams(
             streams: Dictionary(uniqueKeysWithValues: streams.map { ($0.name, StoredStream(url: $0.url, category: $0.category, isFavourite: $0.isFavourite, groupID: $0.groupID)) }),
@@ -664,7 +711,12 @@ final class StreamStore: ObservableObject {
         ) else {
             return nil
         }
-        return loadStoredStreams(from: url)
+        guard let data = try? Data(contentsOf: url),
+              let catalog = try? JSONDecoder().decode(DefaultStreamCatalog.self, from: data) else { return nil }
+        return StoredStreams(
+            streams: catalog.streams.mapValues { StoredStream(url: $0.url, category: $0.category) },
+            order: catalog.order
+        )
     }
 
     private func loadStoredStreams(from url: URL) -> StoredStreams? {
