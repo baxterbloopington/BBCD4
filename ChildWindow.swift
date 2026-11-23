@@ -27,7 +27,8 @@ class EditingWindow: NSWindow {
 
 @MainActor
 func closeSecondaryWindow() {
-    NSApp.keyWindow?.close()
+    guard let window = NSApp.keyWindow as? EditingWindow else { return }
+    window.close()
 }
 
 @MainActor
@@ -168,7 +169,7 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
     final class Coordinator: NSObject, NSWindowDelegate {
         var isPresented: Binding<Bool>
         let title: String
-        weak var window: NSWindow?
+        weak var window: EditingWindow?
         var parentCloseObserver: NSObjectProtocol?
 
         init(isPresented: Binding<Bool>, title: String) {
@@ -195,6 +196,8 @@ private struct ChildWindow<WindowContent: View>: NSViewRepresentable {
             }
             isPresented.wrappedValue = false
             SecondaryWindowRegistry.shared.unregister(title: title)
+            window?.contentViewController = nil
+            window?.contentUndoManager = nil
             window = nil
         }
     }

@@ -1,5 +1,83 @@
 import AVFoundation
 import Foundation
+import ImageIO
+
+enum FrameCaptureDestination: String, CaseIterable, Hashable, Sendable {
+    case clipboard
+    case videoFolder
+
+    static let preferenceKey = "frameCaptureDestination"
+    static let defaultDestination = Self.clipboard
+
+    var title: String {
+        switch self {
+        case .clipboard: "Clipboard"
+        case .videoFolder: "Download folder"
+        }
+    }
+
+    var actionTitle: String {
+        switch self {
+        case .clipboard: "Copy frame to clipboard"
+        case .videoFolder: "Save frame to download folder"
+        }
+    }
+}
+
+enum MediaFrameCapture {
+    enum CaptureError: LocalizedError {
+        case unavailable, invalidImage, clipboardUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable: "This frame could not be captured."
+            case .invalidImage: "The captured frame could not be opened as an image."
+            case .clipboardUnavailable: "The captured frame could not be copied to the clipboard."
+            }
+        }
+    }
+
+    @concurrent
+    static func imageData(source: URL, time: Double) async throws -> Data {
+        try Task.checkCancellation()
+        guard source.isFileURL, time.isFinite, time >= 0, time <= FrameTimecode.maximumTime else {
+            throw CaptureError.unavailable
+        }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("bbcd4-frame-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let image = folder.appendingPathComponent("frame.png")
+        let timestamp = String(format: "%.9f", locale: Locale(identifier: "en_US_POSIX"), max(0, time - 0.000_001))
+        try await MediaProcess.run(executable: MediaProcess.ffmpegExecutable(), arguments:
+            ["-v", "error", "-nostdin", "-ss", timestamp, "-accurate_seek", "-i", source.path,
+             "-map", "0:v:0", "-frames:v", "1", "-an", "-sn", "-dn", "-vf", "scale=iw*sar:ih,setsar=1",
+             "-c:v", "png", "-threads", "1", "-update", "1", image.path])
+        try Task.checkCancellation()
+        guard let imageSource = CGImageSourceCreateWithURL(image as CFURL, nil),
+              CGImageSourceCreateImageAtIndex(imageSource, 0, nil) != nil else { throw CaptureError.invalidImage }
+        return try Data(contentsOf: image)
+    }
+
+    @concurrent
+    static func saveImage(_ data: Data, source: URL, folder: URL, time: Double, frameDuration: Double) async throws -> URL {
+        try Task.checkCancellation()
+        let timecode = FrameTimecode.format(time, frameDuration: frameDuration).replacingOccurrences(of: ":", with: "-")
+        let name = source.deletingPathExtension().lastPathComponent + " - " + timecode
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var index = 1
+        while true {
+            try Task.checkCancellation()
+            let suffix = index == 1 ? "" : " (\(index))"
+            let image = folder.appendingPathComponent(name + suffix).appendingPathExtension("png")
+            do {
+                try data.write(to: image, options: .withoutOverwriting)
+                return image
+            } catch let error as CocoaError where error.code == .fileWriteFileExists {
+                index += 1
+            }
+        }
+    }
+}
 
 struct MediaTrimTimelineViewport: Equatable {
     private(set) var start = 0.0
@@ -57,6 +135,41 @@ enum MediaTrimPlayback {
 }
 
 enum MediaTrimTiming {
+    @concurrent
+    static func frameDuration(asset: AVAsset, track: AVAssetTrack) async -> Double {
+        let rate = Double((try? await track.load(.nominalFrameRate)) ?? 0)
+        let minimum = (try? await track.load(.minFrameDuration))?.seconds ?? 0
+        let nominal = rate.isFinite && rate > 0 ? 1 / rate : 0
+        let validMinimum = FrameTimecode.nominalRate(frameDuration: minimum) != nil
+        let validNominal = FrameTimecode.nominalRate(frameDuration: nominal) != nil
+        if validMinimum, !validNominal || abs(minimum / nominal - 1) < 0.01 { return minimum }
+
+        if let reader = try? AVAssetReader(asset: asset) {
+            let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+            output.alwaysCopiesSampleData = false
+            if reader.canAdd(output) {
+                reader.add(output)
+                if reader.startReading() {
+                    defer { reader.cancelReading() }
+                    var intervals: [Double] = []
+                    for _ in 0..<32 {
+                        guard !Task.isCancelled, let sample = output.copyNextSampleBuffer() else { break }
+                        let count = CMSampleBufferGetNumSamples(sample)
+                        guard count > 0 else { continue }
+                        let interval = CMSampleBufferGetDuration(sample).seconds / Double(count)
+                        if FrameTimecode.nominalRate(frameDuration: interval) != nil { intervals.append(interval) }
+                    }
+                    if !intervals.isEmpty {
+                        intervals.sort()
+                        return intervals[intervals.count / 2]
+                    }
+                }
+            }
+        }
+        if validNominal { return nominal }
+        return validMinimum ? minimum : 1.0 / 30
+    }
+
     static func editPoint(from position: Double, forward: Bool, selection: MediaTrimSelection,
                           cuts: [MediaTrimSelection], frameDuration: Double) -> Double? {
         guard position.isFinite, selection.start.isFinite, selection.end.isFinite,

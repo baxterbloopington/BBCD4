@@ -144,7 +144,7 @@ final class AppMenuController: NSObject, NSMenuItemValidation {
         }
         let app = submenu("BBCD4")
         app.addItem(withTitle: "About BBCD4", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-        command("Check for Updates…", .checkForUpdates, in: app)
+        command("Check for Updates", .checkForUpdates, in: app)
         app.addItem(.separator())
         app.addItem(withTitle: "Hide BBCD4", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = app.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -181,7 +181,7 @@ final class AppMenuController: NSObject, NSMenuItemValidation {
         switch command {
         case .openMedia: return !isOpeningMedia
         case .checkForUpdates:
-            item.title = isCheckingUpdates ? "Checking for Updates…" : "Check for Updates…"
+            item.title = isCheckingUpdates ? "Checking for Updates…" : "Check for Updates"
             return !isCheckingUpdates
         case .outputEditor: return downloadController.activeEditID != nil
         default: return true
@@ -302,29 +302,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        return confirmCancellationBeforeQuitting()
+        NSApp.terminate(nil)
+        return false
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard confirmCancellationBeforeQuitting() else { return .terminateCancel }
+        guard confirmBeforeQuitting() else { return .terminateCancel }
         downloadController.prepareToQuit()
         mediaImportTask?.cancel()
         return .terminateNow
     }
 
-    private func confirmCancellationBeforeQuitting() -> Bool {
-        guard downloadController.isDownloading else { return true }
+    private func confirmBeforeQuitting() -> Bool {
+        let scheduledCount = downloadController.scheduledDownloads.count
+        let editorWarning = MediaTrimWindow.quitWarning
+        guard downloadController.isDownloading || scheduledCount > 0 || editorWarning != nil else { return true }
 
         let alert = NSAlert()
-        alert.messageText = "Cancel download and quit?"
-        alert.informativeText = "The current download will be cancelled."
+        alert.messageText = downloadController.isDownloading ? "Cancel download and quit?"
+            : scheduledCount > 0 ? "Quit with scheduled downloads?" : "Discard editor changes and quit?"
+        var messages: [String] = []
+        if downloadController.isDownloading { messages.append("The current download will be cancelled.") }
+        if let editorWarning { messages.append(editorWarning) }
+        if scheduledCount > 0 {
+            let summary = scheduledCount == 1 ? "There is 1 scheduled download." : "There are \(scheduledCount) scheduled downloads."
+            messages.append(summary + " Scheduled downloads cannot run while BBCD4 is closed. Your schedule will be kept.")
+        }
+        alert.informativeText = messages.joined(separator: "\n\n")
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Quit")
-        alert.addButton(withTitle: "Keep Downloading")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Quit").hasDestructiveAction = downloadController.isDownloading || editorWarning != nil
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        guard alert.runModal() == .alertSecondButtonReturn else { return false }
         downloadController.prepareToQuit()
-        downloadController.cancelCurrentDownload()
+        if downloadController.isDownloading { downloadController.cancelCurrentDownload() }
         return true
     }
 }

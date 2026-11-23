@@ -16,10 +16,19 @@ final class MediaTrimModel: ObservableObject {
     @Published private(set) var position = 0.0
     @Published private(set) var isPlaying = false
     @Published private(set) var isPlaybackRequested = false
+    @Published private(set) var playbackSpeed: Float = 1
     @Published private(set) var isSaving = false
     @Published private(set) var isEncoding = false
     @Published private(set) var encodingProgress = 0.0
+    @Published private(set) var isCapturingFrame = false
+    @Published private(set) var frameCaptureMessage: String?
     var encodingPercentage: Int { Int((encodingProgress * 100).rounded(.down)) }
+    var hasUnsavedChanges: Bool {
+        guard duration > 0 else { return false }
+        return selection != MediaTrimSelection(start: 0, end: duration)
+            || !cuts.isEmpty || cutStart != nil
+            || startText != timecode(selection.start) || endText != timecode(selection.end)
+    }
     @Published private(set) var isPreparingPreview = true
     @Published private(set) var waveform: AudioWaveform = .loading
     @Published private(set) var timelineViewport = MediaTrimTimelineViewport()
@@ -32,6 +41,9 @@ final class MediaTrimModel: ObservableObject {
     private var itemObservation: NSKeyValueObservation?
     private var previewSource: MediaTrimPreviewSource?
     private var saveTask: Task<Void, Never>?
+    private var frameCaptureTask: Task<Void, Never>?
+    private var frameCaptureMessageTask: Task<Void, Never>?
+    private var lastFrameCaptureError: String?
     private var wheelFinishTask: Task<Void, Never>?
     private var handleDragTask: Task<Void, Never>?
     private var handleDrag: MediaTrimHandleDrag?
@@ -202,7 +214,8 @@ final class MediaTrimModel: ObservableObject {
     }
 
     var outputDuration: Double { keptSelections?.reduce(0) { $0 + $1.duration } ?? 0 }
-    var canSave: Bool { !isStopped && !isSaving && cutStart == nil && keptSelections != nil }
+    var canSave: Bool { !isStopped && !isSaving && !isCapturingFrame && cutStart == nil && keptSelections != nil }
+    var canCaptureFrame: Bool { !isStopped && !isSaving && !isCapturingFrame && !isAudioOnly && duration > 0 }
     var requiresCutEncoding: Bool { !isAudioOnly && !cuts.isEmpty }
     var canSaveLossless: Bool { canSave && !requiresCutEncoding }
 
@@ -295,10 +308,7 @@ final class MediaTrimModel: ObservableObject {
                   !tracks.isEmpty || !audioTracks.isEmpty else { throw MediaTrimError.noMedia }
             isAudioOnly = tracks.isEmpty
             if let track = tracks.first {
-                let rate = try await track.load(.nominalFrameRate)
-                let minimumFrameDuration = try await track.load(.minFrameDuration).seconds
-                if minimumFrameDuration.isFinite, minimumFrameDuration > 0 { frameDuration = minimumFrameDuration }
-                else if rate.isFinite, rate > 0 { frameDuration = 1 / Double(rate) }
+                frameDuration = await MediaTrimTiming.frameDuration(asset: asset, track: track)
             } else { frameDuration = 0.001 }
             try Task.checkCancellation()
             guard !isStopped else { return }
@@ -543,7 +553,7 @@ final class MediaTrimModel: ObservableObject {
             player.currentItem?.forwardPlaybackEndTime = CMTime(seconds: end, preferredTimescale: 600_000)
             appliedPlaybackRange = range
         }
-        player.playImmediately(atRate: 1)
+        player.playImmediately(atRate: playbackSpeed)
         isPlaying = true
     }
 
@@ -553,7 +563,8 @@ final class MediaTrimModel: ObservableObject {
         if isPlaybackRequested, let range = appliedPlaybackRange, time >= range.end - 2.0 / 600_000 {
             player.pause()
             isPlaying = false
-            if let next = MediaTrimPlayback.range(atOrAfter: range.end, in: playbackRanges) {
+            let next = MediaTrimPlayback.range(atOrAfter: range.end, in: playbackRanges)
+            if let next {
                 playAfterSeeking = true
                 releasePlaybackRange()
                 seek(next.start)
@@ -645,6 +656,11 @@ final class MediaTrimModel: ObservableObject {
         case .trimPreviousEditPoint: jumpToEditPoint(forward: false)
         case .trimNextEditPoint: jumpToEditPoint(forward: true)
         case .trimPlayback: togglePlayback()
+        case .captureFrame:
+            guard canCaptureFrame else { return false }
+            let destination = FrameCaptureDestination(rawValue: UserDefaults.standard.string(forKey: FrameCaptureDestination.preferenceKey) ?? "")
+                ?? .defaultDestination
+            captureFrame(to: destination)
         default: return false
         }
         return true
@@ -685,8 +701,74 @@ final class MediaTrimModel: ObservableObject {
         else { resumePlayback() }
     }
 
+    func cyclePlaybackSpeed() {
+        guard !isStopped, !isSaving, duration > 0 else { return }
+        switch playbackSpeed {
+        case 1: playbackSpeed = 2
+        case 2: playbackSpeed = 3
+        case 3: playbackSpeed = 0.25
+        case 0.25: playbackSpeed = 0.5
+        default: playbackSpeed = 1
+        }
+        if isPlaybackRequested, player.rate != 0, !seeker.isSeeking, !playAfterSeeking {
+            resumePlayback()
+        }
+    }
+
+    var playbackSpeedLabel: String { String(format: "%g×", playbackSpeed) }
+
+    func captureFrame(to destination: FrameCaptureDestination, pasteboard: NSPasteboard? = nil) {
+        guard canCaptureFrame else { return }
+        var time = playheadTime
+        if let range = appliedPlaybackRange, player.rate == 0, time >= range.end {
+            time = range.end - min(1.0 / 600_000, range.duration / 2)
+        }
+        let lastFrame = max(0, ceil(duration / frameDuration - 0.000_000_1) - 1)
+        time = min(lastFrame, max(0, floor(time / frameDuration + 0.000_000_1))) * frameDuration
+        let interval = frameDuration
+        let folder = DownloadFolderPicker.folder(for: UserDefaults.standard.string(forKey: "downloadFolder") ?? "")
+        isCapturingFrame = true
+        if let previous = lastFrameCaptureError, errorMessage == previous { errorMessage = nil }
+        lastFrameCaptureError = nil
+        frameCaptureMessageTask?.cancel()
+        frameCaptureMessage = nil
+        frameCaptureTask = Task { [weak self, source, time] in
+            do {
+                let data = try await MediaFrameCapture.imageData(source: source, time: time)
+                guard let self, !self.isStopped, !Task.isCancelled else { return }
+                switch destination {
+                case .clipboard:
+                    guard let image = NSImage(data: data), let tiff = image.tiffRepresentation else {
+                        throw MediaFrameCapture.CaptureError.invalidImage
+                    }
+                    let item = NSPasteboardItem()
+                    item.setData(data, forType: .png)
+                    item.setData(tiff, forType: .tiff)
+                    let pasteboard = pasteboard ?? .general
+                    pasteboard.clearContents()
+                    guard pasteboard.writeObjects([item]) else { throw MediaFrameCapture.CaptureError.clipboardUnavailable }
+                case .videoFolder:
+                    _ = try await MediaFrameCapture.saveImage(data, source: source, folder: folder, time: time, frameDuration: interval)
+                }
+                guard !self.isStopped, !Task.isCancelled else { return }
+                self.frameCaptureMessage = destination == .clipboard ? "Frame copied" : "Frame saved"
+                self.frameCaptureMessageTask = Task { [weak self] in
+                    do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                    self?.frameCaptureMessage = nil
+                }
+            } catch is CancellationError {} catch {
+                if let self, !self.isStopped {
+                    self.lastFrameCaptureError = error.localizedDescription
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+            self?.isCapturingFrame = false
+            self?.frameCaptureTask = nil
+        }
+    }
+
     func save(encoding: EncodingConfiguration? = nil, completion: @escaping (URL) -> Void) {
-        guard !isStopped, !isSaving, commitFields() else { return }
+        guard !isStopped, !isSaving, !isCapturingFrame, commitFields() else { return }
         guard cutStart == nil else { errorMessage = MediaTrimError.unfinishedCut.localizedDescription; return }
         guard keptSelections != nil else { errorMessage = MediaTrimError.emptySelection.localizedDescription; return }
         guard encoding != nil || !requiresCutEncoding else { errorMessage = MediaTrimError.cutsRequireEncoding.localizedDescription; return }
@@ -723,11 +805,17 @@ final class MediaTrimModel: ObservableObject {
     }
 
     func stop() {
+        playbackSpeed = 1
         isStopped = true
         cancelPendingScrubbing()
         seeker.stop()
         saveTask?.cancel()
         saveTask = nil
+        frameCaptureTask?.cancel()
+        frameCaptureTask = nil
+        isCapturingFrame = false
+        frameCaptureMessageTask?.cancel()
+        frameCaptureMessageTask = nil
         waveformTask?.cancel()
         waveformTask = nil
         waveformDetailTask?.cancel()
@@ -781,6 +869,9 @@ private struct VideoPreviewPlayer: NSViewRepresentable {
 
 struct MediaTrimView: View {
     @ObservedObject var model: MediaTrimModel
+    @AppStorage(FrameCaptureDestination.preferenceKey) private var frameCaptureDestination = FrameCaptureDestination.defaultDestination.rawValue
+    @AppStorage(AppKeybinding.captureFrame.rawValue) private var captureFrameShortcut = AppKeybinding.captureFrame.defaultShortcut.storedValue
+    @AppStorage(AppKeybinding.captureFrame.enabledStorageKey) private var captureFrameEnabled = true
     @AppStorage(AppKeybinding.trimPlayback.rawValue) private var trimPlaybackShortcut = AppKeybinding.trimPlayback.defaultShortcut.storedValue
     @AppStorage(AppKeybinding.trimPlayback.enabledStorageKey) private var trimPlaybackEnabled = true
     @AppStorage(AppKeybinding.trimCut.rawValue) private var trimCutShortcut = AppKeybinding.trimCut.defaultShortcut.storedValue
@@ -809,6 +900,12 @@ struct MediaTrimView: View {
 
             HStack(spacing: 10) {
                 HStack(spacing: 8) {
+                    if !model.isAudioOnly {
+                        trimButton("Playback speed", icon: .text(model.playbackSpeedLabel),
+                                   hint: "Playback speed",
+                                   action: model.cyclePlaybackSpeed)
+                            .accessibilityValue(model.playbackSpeedLabel)
+                    }
                     trimButton("Reset edits", icon: .system("arrow.counterclockwise"), hint: shortcutHint(.trimReset, "Reset edits"), action: model.reset)
                     trimButton("Previous edit point", icon: .system("backward.end"), hint: shortcutHint(.trimPreviousEditPoint, "Previous edit point")) { model.jumpToEditPoint(forward: false) }
                     trimButton("Set start at playhead", icon: .character("["), hint: shortcutHint(.trimIn, "Set start at playhead")) {
@@ -845,6 +942,17 @@ struct MediaTrimView: View {
                             if model.cutStart != nil { Button("Cancel cut", action: model.cancelCut) }
                             if !model.cuts.isEmpty { Button("Remove all cuts", role: .destructive, action: model.removeAllCuts) }
                         }
+                    if !model.isAudioOnly {
+                        trimButton("Capture frame", icon: .system("camera"), hint: shortcutHint(.captureFrame, captureDestination.actionTitle), alignment: .topTrailing) {
+                            model.captureFrame(to: captureDestination)
+                        }
+                        .contextMenu {
+                            ForEach(FrameCaptureDestination.allCases, id: \.self) { destination in
+                                Button(destination.actionTitle) { model.captureFrame(to: destination) }
+                            }
+                        }
+                        .disabled(!model.canCaptureFrame)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -856,20 +964,25 @@ struct MediaTrimView: View {
                 timeField("End", text: $model.endText, previewEnd: true)
             }
             .frame(maxWidth: .infinity)
-            .help(model.timecodeHelp)
+            .hoverHint(model.timecodeHelp, alignment: .topTrailing, below: true)
             .disabled(model.duration == 0 || model.isSaving)
             if let error = model.errorMessage {
                 Text(error).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
             Text(model.isAudioOnly
                  ? "Saving replaces this file and keeps its filename. Save trims and cuts without re-encoding. Boundaries may shift slightly. Use Encode and save for precise timing."
-                 : "Saving without encoding is faster, but some media players may briefly show hidden frames outside the selection. Most platofrms like Discord and YouTube will display the video as intended. Encode and save prevents this and makes the video more compatible with Apple devices, but is slower.")
+                 : "Saving without encoding is faster, but some media players may briefly show hidden frames outside the selection. Most platforms like Discord and YouTube will display the video as intended. Encode and save prevents this and makes the video more compatible with Apple devices, but is slower.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 if model.isSaving {
                     ProgressView().controlSize(.small)
                     Text(model.isEncoding ? "Encoding… (\(model.encodingPercentage)%)" : "Saving…")
                         .monospacedDigit().foregroundStyle(.secondary)
+                } else if model.isCapturingFrame {
+                    ProgressView().controlSize(.small)
+                    Text("Capturing frame…").font(.caption).foregroundStyle(.secondary)
+                } else if let message = model.frameCaptureMessage {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
                 } else if model.cutStart != nil {
                     Text("Select cut end").font(.caption).foregroundStyle(.red)
                 } else if model.requiresCutEncoding {
@@ -890,6 +1003,10 @@ struct MediaTrimView: View {
         .frame(minWidth: 640, idealWidth: 760, minHeight: 660, idealHeight: 760)
         .task { await model.load() }
         .onDisappear { model.stop() }
+    }
+
+    private var captureDestination: FrameCaptureDestination {
+        FrameCaptureDestination(rawValue: frameCaptureDestination) ?? .defaultDestination
     }
 
     @ViewBuilder private var editorPreview: some View {
@@ -916,7 +1033,7 @@ struct MediaTrimView: View {
             Text("Length: \(model.timecode(model.outputDuration))")
         }
         .monospacedDigit().foregroundStyle(.secondary)
-        .help(model.timecodeHelp)
+        .hoverHint(model.timecodeHelp, alignment: .topTrailing, below: true)
     }
 
     private var videoPreview: some View {
@@ -946,6 +1063,7 @@ struct MediaTrimView: View {
         case .trimPreviousEditPoint: preference = (trimPreviousShortcut, trimPreviousEnabled)
         case .trimNextEditPoint: preference = (trimNextShortcut, trimNextEnabled)
         case .trimPlayback: preference = (trimPlaybackShortcut, trimPlaybackEnabled)
+        case .captureFrame: preference = (captureFrameShortcut, captureFrameEnabled)
         default: return message
         }
         return binding.hint(message, storedValue: preference.0, enabled: preference.1)
@@ -954,6 +1072,7 @@ struct MediaTrimView: View {
     private enum TrimButtonIcon {
         case system(String)
         case character(String)
+        case text(String)
     }
 
     private func trimButton(_ title: String, icon: TrimButtonIcon, hint: String? = nil,
@@ -963,6 +1082,7 @@ struct MediaTrimView: View {
                 switch icon {
                 case .system(let name): Image(systemName: name).font(.system(size: 16, weight: .medium))
                 case .character(let character): Text(character).font(.system(size: 17, weight: .medium, design: .monospaced))
+                case .text(let text): Text(text).font(.system(size: 13, weight: .medium)).monospacedDigit().fixedSize()
                 }
             }
             .frame(width: 20, height: 22)
@@ -1360,6 +1480,12 @@ final class MediaTrimWindow: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    static var quitWarning: String? {
+        guard let model = current?.model else { return nil }
+        if model.isSaving { return "Saving in the editor will be cancelled." }
+        return model.hasUnsavedChanges ? "Unsaved changes in the editor will be discarded." : nil
+    }
+
     private func run(source: URL, mediaName: String) async -> URL? {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -1367,7 +1493,10 @@ final class MediaTrimWindow: NSObject, NSWindowDelegate {
                 guard !Task.isCancelled else { finish(nil); return }
                 let model = MediaTrimModel(source: source)
                 self.model = model
-                let content = MediaTrimView(model: model, mediaName: mediaName) { [weak self] in self?.finish($0) }
+                let content = MediaTrimView(model: model, mediaName: mediaName) { [weak self] output in
+                    if let output { self?.finish(output) }
+                    else { self?.requestClose() }
+                }
                 let window = MediaTrimInputWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 760),
                                       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
                 window.trimModel = model
@@ -1391,13 +1520,31 @@ final class MediaTrimWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    func windowShouldClose(_ sender: NSWindow) -> Bool { finish(nil); return false }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { requestClose(); return false }
+
+    private func requestClose() {
+        guard continuation != nil, let window, let model, window.attachedSheet == nil else { return }
+        guard model.hasUnsavedChanges || model.isSaving else { finish(nil); return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = model.isSaving ? "Cancel saving and close editor?" : "Discard changes and close editor?"
+        alert.informativeText = model.isSaving
+            ? "Saving will be cancelled. Any unsaved changes will be discarded."
+            : "Your unsaved trim and cut changes will be discarded. The file will remain unchanged."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: model.isSaving ? "Cancel Saving and Close" : "Discard Changes")
+            .hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertSecondButtonReturn { self?.finish(nil) }
+        }
+    }
 
     private func finish(_ output: URL?) {
         guard let continuation else { return }
         self.continuation = nil
         if Self.current === self { Self.current = nil }
         model?.stop()
+        if let window, let sheet = window.attachedSheet { window.endSheet(sheet, returnCode: .abort) }
         window?.delegate = nil
         window?.contentViewController = nil
         window?.close()

@@ -111,22 +111,30 @@ extension View {
 struct ScrollStepAccumulator {
     private var accumulated = 0.0
     private var lastTimestamp: TimeInterval?
+    private var lastStepTimestamp: TimeInterval?
+    private var lastDirection: FloatingPointSign?
 
     mutating func consume(delta: Double, precise: Bool, timestamp: TimeInterval, momentum: Bool = false) -> Int {
         guard !momentum, delta.isFinite, delta != 0, timestamp.isFinite else { return 0 }
         if !precise {
             accumulated = 0
             lastTimestamp = timestamp
+            lastStepTimestamp = nil
+            lastDirection = delta.sign
             return delta > 0 ? 1 : -1
         }
         if lastTimestamp.map({ timestamp < $0 || timestamp - $0 > 0.25 }) ?? true
-            || (accumulated != 0 && accumulated.sign != delta.sign) {
+            || lastDirection != delta.sign {
             accumulated = 0
+            lastStepTimestamp = nil
         }
         lastTimestamp = timestamp
+        lastDirection = delta.sign
         accumulated += delta
-        guard abs(accumulated) >= 10 else { return 0 }
-        accumulated.formTruncatingRemainder(dividingBy: 10)
+        guard abs(accumulated) >= 14 else { return 0 }
+        accumulated = 0
+        guard lastStepTimestamp.map({ timestamp - $0 >= 0.06 }) ?? true else { return 0 }
+        lastStepTimestamp = timestamp
         return delta > 0 ? 1 : -1
     }
 }
@@ -224,6 +232,18 @@ struct InAppNotificationMessage: View {
     }
 }
 
+struct DownloadOptionBadge: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+    }
+}
+
 enum SettingsLayout {
     static let sheetWidth: CGFloat = 560
     static let sheetHeight: CGFloat = 720
@@ -232,23 +252,37 @@ enum SettingsLayout {
 }
 private struct SharedControlHoverEffect: ViewModifier {
     let cornerRadius: CGFloat
+    let hideWhileMenuIsOpen: Bool
     @State private var isHovered = false
+    @State private var isMenuTracking = false
 
     func body(content: Content) -> some View {
         content
             .background {
-                if isHovered {
+                if isHovered && !isMenuTracking {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .fill(Color.primary.opacity(ControlMetrics.hoverOpacity))
                 }
             }
-            .onHover { isHovered = $0 }
+            .onHover { isHovered = $0 && !isMenuTracking }
+            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+                if hideWhileMenuIsOpen {
+                    isMenuTracking = true
+                    isHovered = false
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+                if hideWhileMenuIsOpen {
+                    isMenuTracking = false
+                    isHovered = false
+                }
+            }
     }
 }
 
 extension View {
-    func sharedControlHover(cornerRadius: CGFloat = ControlMetrics.cornerRadius) -> some View {
-        modifier(SharedControlHoverEffect(cornerRadius: cornerRadius))
+    func sharedControlHover(cornerRadius: CGFloat = ControlMetrics.cornerRadius, hideWhileMenuIsOpen: Bool = false) -> some View {
+        modifier(SharedControlHoverEffect(cornerRadius: cornerRadius, hideWhileMenuIsOpen: hideWhileMenuIsOpen))
     }
 
     func buttonCursor(isEnabled: Bool) -> some View {
@@ -423,7 +457,7 @@ struct StreamFilterButton: NSViewRepresentable {
     }
 }
 
-private final class StreamFilterButtonCell: NSButtonCell {
+final class FullAreaButtonCell: NSButtonCell {
     override func hitTest(for event: NSEvent, in cellFrame: NSRect, of controlView: NSView) -> NSCell.HitResult {
         guard isEnabled, cellFrame.contains(controlView.convert(event.locationInWindow, from: nil)) else { return [] }
         return [.contentArea, .trackableArea]
@@ -439,7 +473,7 @@ final class StreamFilterControl: NSButton {
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
-        cell = StreamFilterButtonCell()
+        cell = FullAreaButtonCell()
         title = ""
         isBordered = false
         setButtonType(.momentaryChange)

@@ -1148,7 +1148,7 @@ struct StreamManagementView: View {
         groupsItem.submenu = groups
         menu.addItem(groupsItem)
         menu.addItem(.separator())
-        menu.addItem(StreamListMenuItem("Edit", enabled: targets.count == 1) {
+        menu.addItem(StreamListMenuItem("Edit…", enabled: targets.count == 1) {
             selectedStreamIDs = ids
             streamStore.selectedStreamID = stream.id
             showSecondaryWindow(title: "Edit stream", isPresented: $showingEditStream)

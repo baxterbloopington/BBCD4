@@ -295,7 +295,7 @@ final class TimeOptionsStore: ObservableObject {
         return valid.isEmpty ? defaultOptions : valid
     }
 
-    private static func validated(_ value: String) throws -> String {
+    static func validated(_ value: String) throws -> String {
         let pieces = value.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ":")
         guard pieces.count == 2 || pieces.count == 3,
               let hour = Int(pieces[0]), (0...23).contains(hour),

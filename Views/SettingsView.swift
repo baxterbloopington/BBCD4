@@ -42,6 +42,7 @@ struct SettingsView: View {
     @AppStorage("activeStreamCategoryFilter") private var activeStreamCategoryFilter = ""
     @AppStorage("activeFavouritesOnly") private var activeFavouritesOnly = false
     @AppStorage("downloadFilenameFormat") private var downloadFilenameFormat = DownloadFilenameFormat.defaultFormat.rawValue
+    @AppStorage(FrameCaptureDestination.preferenceKey) private var frameCaptureDestination = FrameCaptureDestination.defaultDestination.rawValue
     @AppStorage("appearanceMode") private var appearanceMode = AppAppearance.system.rawValue
     @AppStorage("downloadStartInAppNotification") private var showDownloadStartInAppNotification = true
     @AppStorage("downloadStartSystemNotification") private var showDownloadStartSystemNotification = false
@@ -74,6 +75,13 @@ struct SettingsView: View {
                     encodingConfigurationData = data
                 }
             }
+        )
+    }
+
+    private var frameCaptureDestinationBinding: Binding<FrameCaptureDestination> {
+        Binding(
+            get: { FrameCaptureDestination(rawValue: frameCaptureDestination) ?? .defaultDestination },
+            set: { frameCaptureDestination = $0.rawValue }
         )
     }
 
@@ -249,7 +257,7 @@ struct SettingsView: View {
                                         Text("Default duration")
                                             .font(.headline)
                                         HStack(spacing: ControlMetrics.fieldGap) {
-                                            DurationControl(title: "Hours", value: $defaultHours, range: 0...350)
+                                            DurationControl(title: "Hours", value: $defaultHours, range: 0...DownloadLimits.maximumSelectableHours)
                                             DurationControl(title: "Minutes", value: $defaultMinutes, range: 0...59)
                                             DurationControl(title: "Seconds", value: $defaultSeconds, range: 0...59)
                                         }
@@ -346,6 +354,17 @@ struct SettingsView: View {
                                 SettingsPopupMenu(
                                     values: DownloadFilenameFormat.allCases,
                                     selection: filenameFormatBinding,
+                                    title: { $0.title }
+                                )
+                            }
+                            .frame(height: ControlMetrics.settingsRowHeight)
+                            Divider()
+                            HStack {
+                                Text("Save captured frames to")
+                                Spacer()
+                                SettingsPopupMenu(
+                                    values: FrameCaptureDestination.allCases,
+                                    selection: frameCaptureDestinationBinding,
                                     title: { $0.title }
                                 )
                             }
@@ -500,6 +519,7 @@ struct SettingsView: View {
     }
 
     private func normaliseMenuSettings() {
+        defaultHours = min(DownloadLimits.maximumSelectableHours, max(0, defaultHours))
         if UpdateCheckFrequency(rawValue: updateCheckFrequency) == nil {
             updateCheckFrequency = UpdateCheckFrequency.onLaunch.rawValue
         }
@@ -533,6 +553,7 @@ struct SettingsView: View {
         revealFinishedMedia = false
         completionPlaybackMode = CompletionPlaybackMode.each.rawValue
         defaultEditOutput = MediaTrimPreferences.defaultEnabled
+        frameCaptureDestination = FrameCaptureDestination.defaultDestination.rawValue
         downloadAttempts = 3
         retryDelay = 2
         updateCheckFrequency = UpdateCheckFrequency.onLaunch.rawValue
@@ -619,6 +640,8 @@ struct SettingsView: View {
 
 private struct KeyboardShortcutsView: View {
     @AppStorage(AppKeybinding.trimPlayback.rawValue) private var trimPlaybackKey = AppKeybinding.trimPlayback.defaultShortcut.storedValue
+    @AppStorage(AppKeybinding.captureFrame.rawValue) private var captureFrameKey = AppKeybinding.captureFrame.defaultShortcut.storedValue
+    @AppStorage(AppKeybinding.captureFrame.enabledStorageKey) private var captureFrameEnabled = true
     @AppStorage(AppKeybinding.trimPlayback.enabledStorageKey) private var trimPlaybackEnabled = true
     @AppStorage(AppKeybinding.trimCut.rawValue) private var trimCutKey = AppKeybinding.trimCut.defaultShortcut.storedValue
     @AppStorage(AppKeybinding.trimReset.rawValue) private var trimResetKey = AppKeybinding.trimReset.defaultShortcut.storedValue
@@ -834,6 +857,7 @@ private struct KeyboardShortcutsView: View {
         case .trimPreviousEditPoint: $trimPreviousKey
         case .trimNextEditPoint: $trimNextKey
         case .trimPlayback: $trimPlaybackKey
+        case .captureFrame: $captureFrameKey
         }
     }
 
@@ -857,6 +881,7 @@ private struct KeyboardShortcutsView: View {
         case .trimPreviousEditPoint: $trimPreviousEnabled
         case .trimNextEditPoint: $trimNextEnabled
         case .trimPlayback: $trimPlaybackEnabled
+        case .captureFrame: $captureFrameEnabled
         }
     }
 
@@ -958,7 +983,7 @@ private struct StartTimeManagementView: View {
                     Text(time)
                         .tag(time)
                         .contextMenu {
-                            Button("Edit") {
+                            Button("Edit…") {
                                 selectedTime = time
                                 showSecondaryWindow(title: "Edit start time", isPresented: $isShowingEditTime)
                             }

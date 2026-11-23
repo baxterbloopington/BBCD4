@@ -171,6 +171,7 @@ enum AppKeybinding: String, CaseIterable, Identifiable {
     case trimPreviousEditPoint = "trimPreviousEditPointKeybind"
     case trimNextEditPoint = "trimNextEditPointKeybind"
     case trimPlayback = "trimPlaybackKeybind"
+    case captureFrame = "captureFrameKeybind"
 
     var id: String { rawValue }
 
@@ -194,6 +195,7 @@ enum AppKeybinding: String, CaseIterable, Identifiable {
         case .trimPreviousEditPoint: "Previous edit point"
         case .trimNextEditPoint: "Next edit point"
         case .trimPlayback: "Play / pause edited output"
+        case .captureFrame: "Capture frame"
         }
     }
 
@@ -217,6 +219,7 @@ enum AppKeybinding: String, CaseIterable, Identifiable {
         case .trimPreviousEditPoint: AppShortcut(key: "P")
         case .trimNextEditPoint: AppShortcut(key: "N")
         case .trimPlayback: AppShortcut(key: "space")
+        case .captureFrame: AppShortcut(key: "S")
         }
     }
 
@@ -235,7 +238,7 @@ enum AppKeybinding: String, CaseIterable, Identifiable {
         .toggleFavourite, .setTelevision, .setRadio, .setLiveStream, .editSelectedItem
     ]
 
-    static let trimActions: [AppKeybinding] = [.trimIn, .trimOut, .trimCut, .trimReset, .trimPreviousEditPoint, .trimNextEditPoint, .trimPlayback]
+    static let trimActions: [AppKeybinding] = [.trimIn, .trimOut, .trimCut, .trimReset, .trimPreviousEditPoint, .trimNextEditPoint, .trimPlayback, .captureFrame]
 
     func matches(_ shortcut: AppShortcut, defaults: UserDefaults = .standard) -> Bool {
         guard defaults.object(forKey: enabledStorageKey) as? Bool ?? true else { return false }

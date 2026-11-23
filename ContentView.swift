@@ -42,6 +42,7 @@ struct ContentView: View {
 
     @State private var encodeH265 = EncodingConfiguration.defaultEnabled
     @State private var editOutput = MediaTrimPreferences.defaultEnabled
+    @State private var scheduleRecording = false
     @State private var startDate = Date()
     @State private var hours = 0
     @State private var minutes = 1
@@ -53,6 +54,8 @@ struct ContentView: View {
     @State private var isManagingStreams = false
     @State private var isShowingSettings = false
     @State private var isShowingDownloadQueue = false
+    @State private var isShowingPresets = false
+    @State private var isSavingPreset = false
     @State private var isShowingUpdate = false
     @State private var isShowingCancelConfirmation = false
     @State private var isShowingQueueConfirmation = false
@@ -60,6 +63,7 @@ struct ContentView: View {
     @State private var queueConfirmationID = UUID()
     @StateObject private var updateChecker = UpdateChecker()
     @StateObject private var timeOptionsStore = TimeOptionsStore()
+    @StateObject private var presetStore = DownloadPresetStore()
     @StateObject private var streamAvailability = StreamAvailabilityMonitor()
     @ObservedObject private var downloadController: DownloadController
     @State private var shortcutEventMonitor: Any?
@@ -75,7 +79,7 @@ struct ContentView: View {
         _startDate = State(initialValue: start)
         _dateInput = State(initialValue: DateFormats.formatter(for: defaults.string(forKey: "dateFormat") ?? "dd/MM/yyyy").string(from: start))
         _timeInput = State(initialValue: Self.timeFormatter.string(from: start))
-        _hours = State(initialValue: min(350, max(0, defaults.integer(forKey: "downloadDefaultHours"))))
+        _hours = State(initialValue: min(DownloadLimits.maximumSelectableHours, max(0, defaults.integer(forKey: "downloadDefaultHours"))))
         _minutes = State(initialValue: defaults.object(forKey: "downloadDefaultMinutes") == nil ? 1 : min(59, max(0, defaults.integer(forKey: "downloadDefaultMinutes"))))
         _seconds = State(initialValue: min(59, max(0, defaults.integer(forKey: "downloadDefaultSeconds"))))
     }
@@ -100,7 +104,7 @@ struct ContentView: View {
     }
 
     private var canRequestDownload: Bool {
-        !downloadController.isDownloading
+        (!downloadController.isDownloading || scheduleRecording)
             && streamStore.selectedStream != nil
             && duration > 0
     }
@@ -130,7 +134,7 @@ struct ContentView: View {
         case .openManageStreams:
             showSecondaryWindow(title: "Manage streams", isPresented: $isManagingStreams)
         case .download:
-            if downloadController.isDownloading {
+            if downloadController.isDownloading && !scheduleRecording {
                 isShowingCancelConfirmation = true
             } else {
                 guard canStartDownload else { return false }
@@ -224,6 +228,13 @@ struct ContentView: View {
 
     private var keyboardEnabledContent: some View {
         queueWindowContent
+            .childWindow(isPresented: $isShowingPresets, title: "Download presets", size: NSSize(width: ControlMetrics.mainWindowWidth, height: 420)) {
+                DownloadPresetsView(store: presetStore, timeOptionsStore: timeOptionsStore)
+                    .environmentObject(streamStore)
+            }
+            .sheet(isPresented: $isSavingPreset) {
+                DownloadPresetNameView(title: "Save preset", saveName: savePreset)
+            }
             .onReceive(menuController.actions, perform: handleMenuCommand)
             .onReceive(updateChecker.$isChecking) { menuController.isCheckingUpdates = $0 }
             .alert("App updates", isPresented: Binding(
@@ -256,6 +267,13 @@ struct ContentView: View {
         .onDisappear(perform: removeShortcutEventMonitor)
         .onChange(of: startDate) { _, _ in syncDateInputs() }
         .onChange(of: dateFormat) { _, _ in syncDateInputs() }
+        .onChange(of: scheduleRecording) { _, isScheduled in
+            if !isScheduled {
+                startDate = DownloadLimits.immediateStart(from: startDate, duration: duration,
+                                                         category: streamStore.selectedStream?.category ?? .television)
+                syncDateInputs()
+            }
+        }
         .onChange(of: appearanceMode) { _, mode in
             (AppAppearance(rawValue: mode) ?? .system).apply()
         }
@@ -416,6 +434,7 @@ struct ContentView: View {
             Text("BBCD4")
                 .font(.largeTitle.weight(.bold))
             Spacer()
+            presetMenu
             if updateChecker.release != nil {
                 Button {
                     isShowingUpdate = true
@@ -426,6 +445,57 @@ struct ContentView: View {
             }
         }
         .frame(height: 44)
+    }
+
+    private var presetMenu: some View {
+        HStack(spacing: 8) {
+            Text("Presets")
+            Image(systemName: "chevron.down")
+                .font(.system(size: 11, weight: .semibold))
+        }
+        .padding(.horizontal, 12)
+        .frame(height: ControlMetrics.height)
+        .overlay {
+            PresetMenuTrigger(presets: presetStore.presets, canSave: streamStore.selectedStream != nil && duration > 0,
+                              apply: applyPreset, save: { isSavingPreset = true }, manage: {
+                showSecondaryWindow(title: "Download presets", isPresented: $isShowingPresets)
+            })
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: ControlMetrics.cornerRadius, style: .continuous))
+        .sharedControlHover(hideWhileMenuIsOpen: true)
+        .buttonCursor(isEnabled: true)
+    }
+
+    private func savePreset(name: String) throws {
+        guard let stream = streamStore.selectedStream else { throw DownloadPresetStore.PresetError.missingStream }
+        guard let time = Self.timeFormatters.lazy.compactMap({ $0.date(from: timeInput) }).first else {
+            throw DownloadPresetStore.PresetError.invalidTime
+        }
+        try presetStore.add(name: name, stream: stream, start: time, duration: duration,
+                            editOutput: editOutput, encode: canEncodeSelectedStream && encodeH265)
+    }
+
+    private func applyPreset(_ preset: DownloadPreset) {
+        guard let stream = preset.stream(in: streamStore.streams) else {
+            validationMessage = "The stream used by “\(preset.name)” is no longer available. Edit or add the stream before using this preset."
+            return
+        }
+        guard let start = preset.startToday() else {
+            validationMessage = "This preset’s start time is unavailable today."
+            return
+        }
+        activeStreamCategoryFilter = ""
+        activeFavouritesOnly = false
+        activeOnlineOnly = false
+        streamStore.selectedStreamID = stream.id
+        startDate = start
+        hours = min(DownloadLimits.maximumSelectableHours, preset.duration / 3_600)
+        minutes = preset.duration / 60 % 60
+        seconds = preset.duration % 60
+        editOutput = preset.editOutput
+        encodeH265 = preset.encode
+        syncDateInputs()
     }
 
     private var streamPicker: some View {
@@ -493,7 +563,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: ControlMetrics.labelToControlSpacing) {
             MainFormLabel("Duration")
             HStack(spacing: ControlMetrics.fieldGap) {
-                DurationControl(title: "Hours", value: $hours, range: 0...350)
+                DurationControl(title: "Hours", value: $hours, range: 0...DownloadLimits.maximumSelectableHours)
                 DurationControl(title: "Minutes", value: $minutes, range: 0...59)
                 DurationControl(title: "Seconds", value: $seconds, range: 0...59)
             }
@@ -550,14 +620,14 @@ struct ContentView: View {
     }
 
     private var primaryDownloadButton: some View {
-        Button(downloadController.isDownloading ? "Cancel" : "Download", action: handlePrimaryDownloadButton)
+        Button(scheduleRecording ? "Schedule" : downloadController.isDownloading ? "Cancel" : "Download", action: handlePrimaryDownloadButton)
             .buttonStyle(HoverPrimaryButtonStyle())
             .frame(width: ControlMetrics.durationWidth, height: ControlMetrics.height)
             .disabled(!downloadController.isDownloading && (streamStore.selectedStream == nil || duration == 0))
     }
 
     private func handlePrimaryDownloadButton() {
-        if downloadController.isDownloading {
+        if downloadController.isDownloading && !scheduleRecording {
             isShowingCancelConfirmation = true
         } else {
             requestDownload()
@@ -574,7 +644,7 @@ struct ContentView: View {
             .frame(width: 44, height: ControlMetrics.height)
             .disabled(!canAddToQueue)
             .buttonCursor(isEnabled: canAddToQueue)
-            .hoverHint("Add download to queue", isEnabled: canAddToQueue)
+            .hoverHint(scheduleRecording ? "Add scheduled download to queue" : "Add download to queue", isEnabled: canAddToQueue)
 
             Button(action: showDownloadQueue) {
                 ZStack(alignment: .topTrailing) {
@@ -612,10 +682,13 @@ struct ContentView: View {
 
     private var downloadOptionToggles: some View {
         HStack(spacing: ControlMetrics.fieldGap) {
-            Toggle("Edit output", isOn: $editOutput)
+            Toggle("Edit", isOn: $editOutput)
                 .toggleStyle(.checkbox)
                 .hoverHint("Trim and cut media after downloading", alignment: .topLeading)
             encodeToggle
+            Toggle("Schedule", isOn: $scheduleRecording)
+                .toggleStyle(.checkbox)
+                .hoverHint("Allows selection of a date and time\nin the future to schedule a download", alignment: .topLeading)
         }
     }
 
@@ -663,9 +736,16 @@ struct ContentView: View {
     }
 
     private func requestDownload(addToQueue: Bool = false) {
-        commitDate()
-        commitTime()
         guard let stream = streamStore.selectedStream else { return }
+        guard let date = DateFormats.date(from: dateInput, format: dateFormat),
+              let time = Self.timeFormatters.lazy.compactMap({ $0.date(from: timeInput) }).first else {
+            validationMessage = "Enter a valid start date and time."
+            return
+        }
+        let components = Calendar.current.dateComponents([.hour, .minute, .second], from: time)
+        guard let start = Calendar.current.date(bySettingHour: components.hour ?? 0, minute: components.minute ?? 0,
+                                                second: components.second ?? 0, of: date) else { return }
+        startDate = start
         guard isValidStartDate(startDate) else { return }
         guard isValidEndDate(startDate, duration: duration) else { return }
         let request = DownloadRequest(
@@ -679,9 +759,13 @@ struct ContentView: View {
             maximumConcurrentSegments: sequentialDownloads ? 1 : max(1, min(50, segmentDownloadLimit)),
             filenameFormat: DownloadFilenameFormat(rawValue: downloadFilenameFormat) ?? .defaultFormat,
             encodingConfiguration: EncodingConfiguration.load(),
-            editOutput: editOutput
+            editOutput: editOutput,
+            isScheduled: scheduleRecording
         )
-        if addToQueue, downloadController.isDownloading {
+        if scheduleRecording {
+            downloadController.enqueue(request)
+            showQueueConfirmation("Download scheduled")
+        } else if addToQueue, downloadController.isDownloading {
             downloadController.enqueue(request)
             showQueueConfirmation("Added to queue")
         } else {
@@ -711,7 +795,7 @@ struct ContentView: View {
     }
 
     private func applyDefaultDuration() {
-        hours = min(350, max(0, defaultHours))
+        hours = min(DownloadLimits.maximumSelectableHours, max(0, defaultHours))
         minutes = min(59, max(0, defaultMinutes))
         seconds = min(59, max(0, defaultSeconds))
     }
@@ -745,8 +829,14 @@ struct ContentView: View {
     }
 
     private func scrollStartDate(_ step: Int) {
-        commitDate()
-        guard let date = Calendar.current.date(byAdding: .day, value: step, to: startDate) else { return }
+        let calendar = Calendar.current
+        let day = DateFormats.date(from: dateInput, format: dateFormat) ?? startDate
+        let time = calendar.dateComponents([.hour, .minute, .second], from: startDate)
+        let selected = calendar.date(bySettingHour: time.hour ?? 0, minute: time.minute ?? 0,
+                                     second: time.second ?? 0, of: day) ?? startDate
+        guard let date = DownloadLimits.scrolledStart(from: selected, step: step, duration: duration,
+                                                     category: streamStore.selectedStream?.category ?? .television,
+                                                     scheduled: scheduleRecording) else { return }
         applyDate(date)
     }
 
@@ -777,30 +867,29 @@ struct ContentView: View {
 
     private func isValidStartDate(_ date: Date) -> Bool {
         let now = Date()
-        if date > now {
+        if !scheduleRecording && date > now {
             validationMessage = "Date and time cannot be in the future."
             return false
         }
-        let earliestAllowedDate: Date
-        if selectedStreamIsRadio {
-            earliestAllowedDate = now.addingTimeInterval(-2 * 24 * 60 * 60)
-        } else {
-            earliestAllowedDate = Calendar.current.date(
-                byAdding: .day,
-                value: -14,
-                to: Calendar.current.startOfDay(for: now)
-            ) ?? now
-        }
+        let earliestAllowedDate = DownloadLimits.earliestStart(for: selectedStreamIsRadio ? .radio : .television, now: now)
         if date <= earliestAllowedDate {
             validationMessage = selectedStreamIsRadio
                 ? "Radio downloads are available for the last 24 hours only."
-                : "Video downloads are available for the last 14 days only."
+                : "Video downloads are available for the last 7 days only."
             return false
         }
         return true
     }
 
     private func isValidEndDate(_ date: Date, duration: Int) -> Bool {
+        if scheduleRecording {
+            let availableAfter = date.addingTimeInterval(TimeInterval(duration) + 15)
+            guard date >= DownloadLimits.earliestStart(for: selectedStreamIsRadio ? .radio : .television, now: availableAfter) else {
+                validationMessage = "This scheduled download would be too long to download in full. Choose a shorter duration."
+                return false
+            }
+            return true
+        }
         guard date.addingTimeInterval(TimeInterval(duration)) <= Date() else {
             validationMessage = "This download would end in the future. Please change the start time or duration."
             return false
@@ -888,19 +977,26 @@ private struct BBCD4DialogModifier: ViewModifier {
             .onChange(of: showFailureNotification) { _, enabled in
                 isShowingIncompleteDownload = enabled && downloadController.incompleteDownload != nil
             }
-            .alert("Download incomplete", isPresented: $isShowingIncompleteDownload, presenting: downloadController.incompleteDownload) { _ in
+            .onChange(of: isShowingIncompleteDownload) { _, isPresented in
+                if !isPresented, showFailureNotification, downloadController.incompleteDownload != nil {
+                    DispatchQueue.main.async {
+                        isShowingIncompleteDownload = showFailureNotification && downloadController.incompleteDownload != nil
+                    }
+                }
+            }
+            .alert("Download incomplete", isPresented: $isShowingIncompleteDownload, presenting: downloadController.incompleteDownload) { incomplete in
                 Button("Retry") {
                     downloadController.errorMessage = nil
-                    downloadController.retryIncompleteDownload()
+                    downloadController.retryIncompleteDownload(id: incomplete.id)
                 }
                 .keyboardShortcut(.defaultAction)
                 Button("Save") {
                     downloadController.errorMessage = nil
-                    downloadController.savePartialDownload()
+                    downloadController.savePartialDownload(id: incomplete.id)
                 }
                 Button("Abort", role: .cancel) {
                     downloadController.errorMessage = nil
-                    downloadController.discardIncompleteDownload()
+                    downloadController.discardIncompleteDownload(id: incomplete.id)
                 }
             } message: { incomplete in
                 Text(incompleteDownloadMessage(incomplete))
@@ -943,8 +1039,8 @@ private struct BBCD4DialogModifier: ViewModifier {
     }
 
     private func incompleteDownloadMessage(_ incomplete: IncompleteDownload) -> String {
-        var message = "Failed to download \(incomplete.failedSegments.count) of \(incomplete.segments.count) segments."
-        if let error = downloadController.errorMessage, !error.isEmpty {
+        var message = "Failed to download \(incomplete.failedSegments.count) of \(incomplete.segments.count) segments for \(incomplete.request.stream.name)."
+        if let error = downloadController.incompleteDownloadError, !error.isEmpty {
             message += "\n\n" + error
         }
         return message + "\n\nRetry the missing segments, save the downloaded parts, or abort without saving."
@@ -998,6 +1094,7 @@ private struct UpdateReleaseNotesView: View {
             .padding(20)
         }
         .frame(minWidth: 560, idealWidth: 620, maxWidth: 680, minHeight: 440, idealHeight: 540, maxHeight: 620)
+        .presentationBackground(Color(nsColor: .windowBackgroundColor))
     }
 }
 
@@ -1069,7 +1166,7 @@ private struct StreamAvailabilityIndicator: View {
     }
 }
 
-private struct StreamSelector: View {
+struct StreamSelector: View {
     let streams: [Stream]
     let groups: [StreamGroup]
     @Binding var selection: String?
@@ -1086,13 +1183,17 @@ private struct StreamSelector: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer()
+            }
+            .padding(.leading, 12)
+            .padding(.trailing, ControlMetrics.timeChevronHitWidth)
+            .frame(width: ControlMetrics.streamSelectorWidth, height: ControlMetrics.height)
+            .overlay(alignment: .trailing) {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 15, weight: .semibold))
                     .offset(x: ControlMetrics.timeChevronOffset)
                     .frame(width: ControlMetrics.timeChevronHitWidth, height: ControlMetrics.height)
+                    .allowsHitTesting(false)
             }
-            .padding(.leading, 12)
-            .frame(width: ControlMetrics.streamSelectorWidth, height: ControlMetrics.height)
             .contentShape(Rectangle())
 
             StreamMenuTrigger(streams: streams, groups: groups, selection: $selection, availability: availability, checkingURLs: checkingURLs)
@@ -1107,6 +1208,91 @@ private struct StreamSelector: View {
         }
     }
 }
+private struct PresetMenuTrigger: NSViewRepresentable {
+    let presets: [DownloadPreset]
+    let canSave: Bool
+    let apply: (DownloadPreset) -> Void
+    let save: () -> Void
+    let manage: () -> Void
+
+    func makeNSView(context: Context) -> PresetMenuControl { PresetMenuControl() }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: PresetMenuControl, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? ControlMetrics.height)
+    }
+
+    func updateNSView(_ control: PresetMenuControl, context: Context) {
+        control.presets = presets
+        control.canSave = canSave
+        control.onApply = apply
+        control.onSave = save
+        control.onManage = manage
+    }
+}
+
+private final class PresetMenuControl: NSButton {
+    var presets: [DownloadPreset] = []
+    var canSave = false
+    var onApply: ((DownloadPreset) -> Void)?
+    var onSave: (() -> Void)?
+    var onManage: (() -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        cell = FullAreaButtonCell()
+        title = ""
+        isBordered = false
+        setButtonType(.momentaryPushIn)
+        (cell as? NSButtonCell)?.highlightsBy = []
+        target = self
+        action = #selector(openMenu(_:))
+        setAccessibilityRole(.popUpButton)
+        setAccessibilityLabel("Download presets")
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0) }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseDown(with event: NSEvent) { openMenu(nil) }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 125 { openMenu(nil) }
+        else { super.keyDown(with: event) }
+    }
+
+    @objc private func openMenu(_ sender: Any?) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for (index, preset) in presets.enumerated() {
+            let item = NSMenuItem(title: preset.name, action: #selector(applyPreset(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            menu.addItem(item)
+        }
+        if !presets.isEmpty { menu.addItem(.separator()) }
+        let save = NSMenuItem(title: "Save current settings…", action: #selector(savePreset(_:)), keyEquivalent: "")
+        save.target = self
+        save.isEnabled = canSave
+        menu.addItem(save)
+        let manage = NSMenuItem(title: "Manage presets…", action: #selector(managePresets(_:)), keyEquivalent: "")
+        manage.target = self
+        menu.addItem(manage)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height), in: self)
+    }
+
+    @objc private func applyPreset(_ sender: NSMenuItem) {
+        guard presets.indices.contains(sender.tag) else { return }
+        onApply?(presets[sender.tag])
+    }
+    @objc private func savePreset(_ sender: Any?) { onSave?() }
+    @objc private func managePresets(_ sender: Any?) { onManage?() }
+}
+
 private struct StreamMenuTrigger: NSViewRepresentable {
     let streams: [Stream]
     let groups: [StreamGroup]
@@ -1142,6 +1328,7 @@ private final class StreamMenuTriggerView: NSView {
         didSet { if let activeMenu { updateAvailability(in: activeMenu) } }
     }
     private weak var activeMenu: NSMenu?
+    private var scrollMotion = ScrollStepAccumulator()
 
     private func updateAvailability(in menu: NSMenu) {
         for item in menu.items {
@@ -1184,10 +1371,11 @@ private final class StreamMenuTriggerView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         let orderedStreams = StreamGrouping.sections(for: streams, groups: groups).flatMap(\.streams)
-        guard !orderedStreams.isEmpty, event.scrollingDeltaY != 0 else { return }
+        let step = scrollMotion.consume(delta: event.scrollingDeltaY, precise: event.hasPreciseScrollingDeltas,
+                                        timestamp: event.timestamp, momentum: !event.momentumPhase.isEmpty)
+        guard !orderedStreams.isEmpty, step != 0 else { return }
         let currentIndex = orderedStreams.firstIndex { $0.id == selectedID } ?? 0
-        let step = event.scrollingDeltaY > 0 ? -1 : 1
-        let nextIndex = min(max(currentIndex + step, 0), orderedStreams.count - 1)
+        let nextIndex = min(max(currentIndex - step, 0), orderedStreams.count - 1)
         guard nextIndex != currentIndex else { return }
         onSelect?(orderedStreams[nextIndex].id)
     }
@@ -1233,6 +1421,7 @@ private final class TimeMenuTriggerView: NSView {
     var onSelect: ((String) -> Void)?
     var onHoverChanged: ((Bool) -> Void)?
     private var hoverTrackingArea: NSTrackingArea?
+    private var scrollMotion = ScrollStepAccumulator()
 
     override func updateTrackingAreas() {
         if let hoverTrackingArea {
@@ -1271,9 +1460,11 @@ private final class TimeMenuTriggerView: NSView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard event.scrollingDeltaY != 0,
+        let step = scrollMotion.consume(delta: event.scrollingDeltaY, precise: event.hasPreciseScrollingDeltas,
+                                        timestamp: event.timestamp, momentum: !event.momentumPhase.isEmpty)
+        guard step != 0,
               let time = TimeOptionsStore.scrollTarget(from: selectedValue, options: options,
-                  step: event.scrollingDeltaY > 0 ? 1 : -1) else { return }
+                  step: step) else { return }
         onSelect?(time)
     }
 
@@ -1398,7 +1589,7 @@ private struct DateEntryField: NSViewRepresentable {
     }
 }
 
-private struct TimeSelector: View {
+struct TimeSelector: View {
     @Binding var value: String
     let options: [String]
     let onCommit: () -> Void

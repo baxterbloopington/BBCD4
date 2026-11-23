@@ -110,6 +110,9 @@ struct DownloadRequest: Sendable, Codable {
 
     var encodingConfiguration: EncodingConfiguration? = nil
     var editOutput = false
+    var isScheduled = false
+    var end: Date { start.addingTimeInterval(TimeInterval(duration)) }
+    var availableAfter: Date { isScheduled ? end.addingTimeInterval(15) : .distantPast }
     var shouldEncodeDownload: Bool {
         encodeH265 && MediaTrimPreferences.canEncodeDownload(category: stream.category, editing: editOutput)
     }
@@ -120,6 +123,7 @@ extension DownloadRequest {
         case stream, start, duration, outputFolder, encodeH265, retryAttempts, retryDelay
         case maximumConcurrentSegments, filenameFormat, encodingConfiguration
         case editOutput = "trimVideo"
+        case isScheduled
     }
 
     init(from decoder: Decoder) throws {
@@ -134,6 +138,7 @@ extension DownloadRequest {
         }
         encodeH265 = (try? values.decode(Bool.self, forKey: .encodeH265)) ?? false
         editOutput = (try? values.decode(Bool.self, forKey: .editOutput)) ?? false
+        isScheduled = try values.decodeIfPresent(Bool.self, forKey: .isScheduled) ?? false
         retryAttempts = min(10, max(1, (try? values.decode(Int.self, forKey: .retryAttempts)) ?? 3))
         retryDelay = DownloadLimits.retryDelay((try? values.decode(Double.self, forKey: .retryDelay)) ?? 2)
         maximumConcurrentSegments = min(50, max(1, (try? values.decode(Int.self, forKey: .maximumConcurrentSegments)) ?? 5))
@@ -251,7 +256,7 @@ enum DownloadError: LocalizedError {
         case .futureTime:
             "Chosen time cannot be in the future."
         case .dateTooOld:
-            "Chosen date must be within the past 14 days."
+            "Chosen date must be within the past 7 days."
         case .radioDateTooOld:
             "Chosen date must be within the past 24 hours."
         case .ffmpegMissing:
@@ -508,6 +513,7 @@ enum DownloadNotifications {
 @MainActor
 final class DownloadController: ObservableObject {
     typealias DownloadRunner = @Sendable (DownloadRequest, @escaping @Sendable (DownloadUpdate) async -> Void) async throws -> URL
+    typealias IncompleteRunner = @Sendable (IncompleteDownload, @escaping @Sendable (DownloadUpdate) async -> Void) async throws -> URL
     typealias OutputEditor = @MainActor (URL, String) async -> URL?
     @Published private(set) var status = "Ready"
     @Published private(set) var progress = 0.0 {
@@ -519,12 +525,18 @@ final class DownloadController: ObservableObject {
     @Published var completedOutput: URL?
     @Published var completedRequest: DownloadRequest?
     @Published var errorMessage: String?
-    @Published var incompleteDownload: IncompleteDownload?
+    @Published private(set) var incompleteDownload: IncompleteDownload?
     @Published private(set) var currentRequest: DownloadRequest?
     @Published private(set) var lastDownloadStarted: DownloadRequest?
     @Published private(set) var downloadStartID: UUID?
     @Published private(set) var lastDownloadStartedFromQueue = false
     @Published private(set) var queue: [QueuedDownload]
+    var scheduledDownloads: [QueuedDownload] {
+        queue.enumerated().filter { $0.element.request.isScheduled }.sorted {
+            if $0.element.request.start == $1.element.request.start { return $0.offset < $1.offset }
+            return $0.element.request.start < $1.element.request.start
+        }.map(\.element)
+    }
     @Published private(set) var isQueuePaused: Bool
     @Published private(set) var pendingEdits: [PendingOutputEdit]
     @Published private(set) var activeEditID: UUID?
@@ -532,6 +544,18 @@ final class DownloadController: ObservableObject {
     private var activeTask: Task<Void, Never>?
     private var activeOperationID: UUID?
     private var activeIncompleteDownload: IncompleteDownload?
+    private var activeQueuedDownload: QueuedDownload?
+    private enum IncompleteResolution { case retry, save }
+    private struct IncompleteJob {
+        let item: QueuedDownload
+        let download: IncompleteDownload
+        var resolution: IncompleteResolution?
+        let errorMessage: String?
+    }
+    private var incompleteJobs: [IncompleteJob] = []
+    var incompleteDownloadError: String? {
+        incompleteJobs.first { $0.download.id == incompleteDownload?.id }?.errorMessage
+    }
     private let queueDefaultsKey = "BBCD4Mac.downloadQueue"
     private let queuePauseDefaultsKey = "BBCD4Mac.downloadQueuePaused"
 
@@ -541,15 +565,28 @@ final class DownloadController: ObservableObject {
     private var editsRecoveryData: Data?
     private var editingTask: Task<Void, Never>?
     private let runDownload: DownloadRunner
+    private let retryDownload: IncompleteRunner
+    private let savePartial: IncompleteRunner
+    private let showsInAppFailure: @MainActor () -> Bool
     private let presentEditor: OutputEditor
     private var isShuttingDown = false
+    private var scheduleTask: Task<Void, Never>?
+    private let currentDate: @MainActor () -> Date
 
     init(defaults: UserDefaults = .standard, automaticallyStartsQueue: Bool = true,
          runDownload: @escaping DownloadRunner = DownloadEngine.run,
-         presentEditor: @escaping OutputEditor = MediaTrimWindow.present) {
+         retryDownload: @escaping IncompleteRunner = DownloadEngine.retry,
+         savePartial: @escaping IncompleteRunner = DownloadEngine.savePartial,
+         showsInAppFailure: @escaping @MainActor () -> Bool = { DownloadNotifications.showsInAppFailure },
+         presentEditor: @escaping OutputEditor = MediaTrimWindow.present,
+         currentDate: @escaping @MainActor () -> Date = Date.init) {
         self.defaults = defaults
         self.runDownload = runDownload
+        self.retryDownload = retryDownload
+        self.savePartial = savePartial
+        self.showsInAppFailure = showsInAppFailure
         self.presentEditor = presentEditor
+        self.currentDate = currentDate
         let loaded = Self.loadQueue(in: defaults)
         queue = loaded.items
         queueRecoveryData = loaded.recovery
@@ -580,7 +617,7 @@ final class DownloadController: ObservableObject {
     }
 
     func submit(_ request: DownloadRequest) {
-        if isDownloading || incompleteDownload != nil {
+        if request.isScheduled || isDownloading || !incompleteJobs.isEmpty {
             enqueue(request)
         } else {
             start(request)
@@ -596,29 +633,42 @@ final class DownloadController: ObservableObject {
     func removeQueuedDownload(_ item: QueuedDownload) {
         queue.removeAll { $0.id == item.id }
         saveQueue()
+        if scheduleTask != nil { startNextDownloadIfPossible() }
     }
 
-    func moveQueuedDownloads(fromOffsets source: IndexSet, toOffset destination: Int) {
-        queue.move(fromOffsets: source, toOffset: destination)
+    func moveQueuedDownloads(fromOffsets source: IndexSet, toOffset destination: Int, scheduled: Bool? = nil) {
+        guard scheduled != true else { return }
+        if let scheduled {
+            let indices = queue.indices.filter { queue[$0].request.isScheduled == scheduled }
+            guard source.allSatisfy({ indices.indices.contains($0) }), (0...indices.count).contains(destination) else { return }
+            var items = indices.map { queue[$0] }
+            items.move(fromOffsets: source, toOffset: destination)
+            for (index, item) in zip(indices, items) { queue[index] = item }
+        } else {
+            queue.move(fromOffsets: source, toOffset: destination)
+        }
         saveQueue()
+        if scheduleTask != nil { startNextDownloadIfPossible() }
     }
 
     func clearQueue() {
         queue.removeAll()
         saveQueue()
+        scheduleTask?.cancel()
+        scheduleTask = nil
     }
 
     func toggleQueuePaused() {
         isQueuePaused.toggle()
         defaults.set(isQueuePaused, forKey: queuePauseDefaultsKey)
 
-        if !isQueuePaused {
-            startNextDownloadIfPossible()
-        }
+        startNextDownloadIfPossible()
     }
 
-    private func start(_ request: DownloadRequest, fromQueue: Bool = false) {
+    private func start(_ request: DownloadRequest, fromQueue: Bool = false, item: QueuedDownload? = nil) {
         guard !isDownloading else { return }
+        activeQueuedDownload = item ?? QueuedDownload(request: request)
+        saveQueue()
         if !playbackBatchActive {
             completionSequencePosition = 0
             playbackBatchActive = true
@@ -663,54 +713,44 @@ final class DownloadController: ObservableObject {
         }
     }
 
-    func savePartialDownload() {
-        guard let incomplete = incompleteDownload, !isDownloading else { return }
-        incompleteDownload = nil
-        currentRequest = incomplete.request
-        isDownloading = true
-        status = "Saving downloaded segments…"
-        activeIncompleteDownload = incomplete
-        let operationID = beginOperation()
-        activeTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let output = try await DownloadEngine.savePartial(incomplete) { update in
-                    await self.apply(update, operationID: operationID)
-                }
-                guard self.isCurrent(operationID) else { return }
-                try await completeDownload(request: incomplete.request, output: output, operationID: operationID)
-            } catch is CancellationError {
-                finishCancelled(operationID)
-            } catch {
-                guard self.isCurrent(operationID) else { return }
-                errorMessage = error.localizedDescription
-                status = "Error"
-                DownloadNotifications.postFailure(request: incomplete.request, message: error.localizedDescription)
-                if DownloadNotifications.showsInAppFailure {
-                    incompleteDownload = incomplete
-                    finishOperation(operationID)
-                } else {
-                    DownloadEngine.discard(incomplete)
-                    incompleteDownload = nil
-                    errorMessage = nil
-                    finishOperation(operationID)
-                }
-            }
-        }
+    func savePartialDownload(id: UUID? = nil) {
+        requestIncompleteResolution(id: id, resolution: .save)
     }
 
-    func retryIncompleteDownload() {
-        guard let incomplete = incompleteDownload, !isDownloading else { return }
-        incompleteDownload = nil
+    func retryIncompleteDownload(id: UUID? = nil) {
+        requestIncompleteResolution(id: id, resolution: .retry)
+    }
+
+    private func requestIncompleteResolution(id: UUID?, resolution: IncompleteResolution) {
+        guard let id = id ?? incompleteDownload?.id,
+              let index = incompleteJobs.firstIndex(where: { $0.download.id == id && $0.resolution == nil }) else { return }
+        incompleteJobs[index].resolution = resolution
+        refreshIncompleteDownload()
+        saveQueue()
+        startNextDownloadIfPossible()
+    }
+
+    private func refreshIncompleteDownload() {
+        let next = incompleteJobs.first(where: { $0.resolution == nil })?.download
+        if incompleteDownload?.id != next?.id { incompleteDownload = next }
+    }
+
+    private func startIncompleteResolution(_ job: IncompleteJob) {
+        guard let resolution = job.resolution, !isDownloading else { return }
+        let incomplete = job.download
+        activeQueuedDownload = job.item
+        activeIncompleteDownload = incomplete
+        saveQueue()
         currentRequest = incomplete.request
         isDownloading = true
-        status = "Retrying from the failed segment…"
-        activeIncompleteDownload = incomplete
+        progress = 0
+        status = resolution == .retry ? "Retrying from the failed segment…" : "Saving downloaded segments…"
         let operationID = beginOperation()
         activeTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let output = try await DownloadEngine.retry(incomplete) { update in
+                let runner = resolution == .retry ? retryDownload : savePartial
+                let output = try await runner(incomplete) { update in
                     await self.apply(update, operationID: operationID)
                 }
                 guard self.isCurrent(operationID) else { return }
@@ -730,6 +770,12 @@ final class DownloadController: ObservableObject {
                 errorMessage = error.localizedDescription
                 status = "Error"
                 DownloadNotifications.postFailure(request: incomplete.request, message: error.localizedDescription)
+                if showsInAppFailure() {
+                    retainIncompleteDownload(incomplete, errorMessage: error.localizedDescription)
+                } else {
+                    DownloadEngine.discard(incomplete)
+                    errorMessage = nil
+                }
                 finishOperation(operationID)
             }
         }
@@ -748,7 +794,8 @@ final class DownloadController: ObservableObject {
         activeTask = nil
         activeOperationID = nil
         activeIncompleteDownload = nil
-        incompleteDownload = nil
+        activeQueuedDownload = nil
+        saveQueue()
         currentRequest = nil
         completedOutput = nil
         errorMessage = nil
@@ -758,20 +805,24 @@ final class DownloadController: ObservableObject {
         startNextDownloadIfPossible()
     }
 
-    func discardIncompleteDownload() {
-        guard let incomplete = incompleteDownload else { return }
-        DownloadEngine.discard(incomplete)
-        incompleteDownload = nil
-        status = "Ready"
+    func discardIncompleteDownload(id: UUID? = nil) {
+        guard let id = id ?? incompleteDownload?.id,
+              let index = incompleteJobs.firstIndex(where: { $0.download.id == id && $0.resolution == nil }) else { return }
+        let job = incompleteJobs.remove(at: index)
+        DownloadEngine.discard(job.download)
+        refreshIncompleteDownload()
+        saveQueue()
+        if !isDownloading { status = "Ready" }
         startNextDownloadIfPossible()
     }
 
     func resolveIncompleteDownloadWithoutPrompt() {
-        guard let incomplete = incompleteDownload, !isDownloading else { return }
-        if DownloadEngine.hasSaveablePartial(incomplete) {
-            savePartialDownload()
-        } else {
-            discardIncompleteDownload()
+        while let incomplete = incompleteDownload {
+            if DownloadEngine.hasSaveablePartial(incomplete) {
+                savePartialDownload(id: incomplete.id)
+            } else {
+                discardIncompleteDownload(id: incomplete.id)
+            }
         }
     }
 
@@ -833,7 +884,7 @@ final class DownloadController: ObservableObject {
             pendingEdits.append(edit)
             savePendingEdits()
             progress = 1
-            status = "Downloaded — awaiting editing"
+            status = "Downloaded - Editing"
             finishOperation(operationID)
             openNextPendingEdit()
             return
@@ -851,7 +902,7 @@ final class DownloadController: ObservableObject {
             let mode = defaults.string(forKey: "completionPlaybackMode") ?? "each"
             let shouldPlay = mode == "each"
                 || (mode == "first" && completionSequencePosition == 1)
-                || (mode == "last" && queue.isEmpty && !hasPendingDownloadEdits && (finishingDownload || !isDownloading))
+                || (mode == "last" && queue.isEmpty && incompleteJobs.isEmpty && !hasPendingDownloadEdits && (finishingDownload || !isDownloading))
             if shouldPlay { NSWorkspace.shared.open(output) }
         }
         completedRequest = request
@@ -942,27 +993,27 @@ final class DownloadController: ObservableObject {
     func prepareToQuit() {
         isShuttingDown = true
         editingTask?.cancel()
+        scheduleTask?.cancel()
+        scheduleTask = nil
+    }
+
+    private func retainIncompleteDownload(_ incomplete: IncompleteDownload, resolution: IncompleteResolution? = nil, errorMessage: String? = nil) {
+        let item = activeQueuedDownload ?? QueuedDownload(request: incomplete.request)
+        incompleteJobs.append(IncompleteJob(item: item, download: incomplete, resolution: resolution, errorMessage: errorMessage))
+        activeQueuedDownload = nil
+        refreshIncompleteDownload()
     }
 
     private func resolveIncompleteDownload(_ incomplete: IncompleteDownload, operationID: UUID) {
-        if DownloadNotifications.showsInAppFailure {
-            incompleteDownload = incomplete
-            finishOperation(operationID)
-            return
-        }
-
-        if DownloadEngine.hasSaveablePartial(incomplete) {
-            incompleteDownload = incomplete
-            finishOperation(operationID)
-            DispatchQueue.main.async { [weak self] in
-                self?.savePartialDownload()
-            }
+        if showsInAppFailure() {
+            retainIncompleteDownload(incomplete)
+        } else if DownloadEngine.hasSaveablePartial(incomplete) {
+            retainIncompleteDownload(incomplete, resolution: .save)
         } else {
             DownloadEngine.discard(incomplete)
-            incompleteDownload = nil
             status = "Download incomplete"
-            finishOperation(operationID)
         }
+        finishOperation(operationID)
     }
 
     private func beginOperation() -> UUID {
@@ -980,6 +1031,8 @@ final class DownloadController: ObservableObject {
         activeTask = nil
         activeOperationID = nil
         activeIncompleteDownload = nil
+        activeQueuedDownload = nil
+        saveQueue()
         currentRequest = nil
         isDownloading = false
         startNextDownloadIfPossible()
@@ -990,6 +1043,8 @@ final class DownloadController: ObservableObject {
         activeTask = nil
         activeOperationID = nil
         activeIncompleteDownload = nil
+        activeQueuedDownload = nil
+        saveQueue()
         currentRequest = nil
         progress = 0
         status = "Cancelled"
@@ -997,18 +1052,40 @@ final class DownloadController: ObservableObject {
         startNextDownloadIfPossible()
     }
 
-    private func startNextDownloadIfPossible() {
-        if !isDownloading && incompleteDownload == nil && queue.isEmpty && !hasPendingDownloadEdits {
+    func startNextDownloadIfPossible() {
+        scheduleTask?.cancel()
+        scheduleTask = nil
+        if !isDownloading && incompleteJobs.isEmpty && queue.isEmpty && !hasPendingDownloadEdits {
             playbackBatchActive = false
         }
-        guard !isShuttingDown, !isQueuePaused, !isDownloading, incompleteDownload == nil, !queue.isEmpty else { return }
-        let next = queue.removeFirst()
-        saveQueue()
-        start(next.request, fromQueue: true)
+        guard !isShuttingDown, !isDownloading else { return }
+        let now = currentDate()
+        let recording = scheduledDownloads.first { $0.request.availableAfter <= now }
+        if recording == nil, let index = incompleteJobs.firstIndex(where: { $0.resolution != nil }) {
+            let job = incompleteJobs.remove(at: index)
+            startIncompleteResolution(job)
+            return
+        }
+        let nextIndex = recording.flatMap { recording in queue.firstIndex { $0.id == recording.id } }
+            ?? (isQueuePaused || !incompleteJobs.isEmpty ? nil : queue.firstIndex { !$0.request.isScheduled })
+        guard let index = nextIndex else {
+            guard let nextDate = queue.filter({ $0.request.isScheduled }).map(\.request.availableAfter).min() else { return }
+            let delay = max(0.05, min(60, nextDate.timeIntervalSince(currentDate())))
+            scheduleTask = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                guard let self, !Task.isCancelled else { return }
+                self.scheduleTask = nil
+                self.startNextDownloadIfPossible()
+            }
+            return
+        }
+        let next = queue.remove(at: index)
+        start(next.request, fromQueue: true, item: next)
     }
 
     private func saveQueue() {
-        guard let data = try? JSONEncoder().encode(queue) else { return }
+        let recoverable = (activeQueuedDownload.map { [$0] } ?? []) + incompleteJobs.map(\.item) + queue
+        guard let data = try? JSONEncoder().encode(recoverable) else { return }
         if let queueRecoveryData {
             defaults.set(queueRecoveryData, forKey: queueDefaultsKey + ".recovery-" + UUID().uuidString)
             self.queueRecoveryData = nil
@@ -1206,20 +1283,10 @@ enum DownloadEngine {
         }
         guard request.start <= Date() else { throw DownloadError.futureTime }
         let now = Date()
-        if request.stream.category == .radio {
-            guard request.start > now.addingTimeInterval(-2 * 24 * 60 * 60) else {
-                throw DownloadError.radioDateTooOld
-            }
-        } else {
-            let earliestAllowedDay = Calendar.current.date(
-                byAdding: .day,
-                value: -14,
-                to: Calendar.current.startOfDay(for: now)
-            ) ?? now
-            guard request.start >= earliestAllowedDay else {
-                throw DownloadError.dateTooOld
-            }
+        guard request.start > DownloadLimits.earliestStart(for: request.stream.category, now: now) else {
+            throw request.stream.category == .radio ? DownloadError.radioDateTooOld : DownloadError.dateTooOld
         }
+        guard request.end <= now else { throw DownloadError.futureTime }
 
         let startSegment = segmentStarting(atOrBefore: request.start)
         let endSegment = Int(ceil((request.start.timeIntervalSince1970 + Double(request.duration)) / segmentDuration)) - 1
